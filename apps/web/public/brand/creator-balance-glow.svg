@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 520" fill="none">
+  <defs>
+    <linearGradient id="sky" x1="90" y1="42" x2="730" y2="522" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#E8E7F0"/>
+      <stop offset=".44" stop-color="#C8D8F5"/>
+      <stop offset=".7" stop-color="#FFC47E"/>
+      <stop offset="1" stop-color="#17202D"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientTransform="matrix(-520 215 -106 -257 880 305)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFF4D4"/>
+      <stop offset=".42" stop-color="#FFC47E" stop-opacity=".78"/>
+      <stop offset="1" stop-color="#FFC47E" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="shade" x1="450" y1="295" x2="450" y2="520" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#19212E" stop-opacity="0"/>
+      <stop offset="1" stop-color="#19212E" stop-opacity=".88"/>
+    </linearGradient>
+    <filter id="blur" x="-40" y="-40" width="980" height="600" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse">
+      <feGaussianBlur stdDeviation="24"/>
+    </filter>
+  </defs>
+  <path fill="url(#sky)" d="M0 0h900v520H0z"/>
+  <path fill="url(#glow)" filter="url(#blur)" d="M0 0h900v520H0z"/>
+  <path fill="url(#shade)" d="M0 0h900v520H0z"/>
+  <path d="M900 308 460 520h440V308Z" fill="#101722" fill-opacity=".46"/>
+</svg>

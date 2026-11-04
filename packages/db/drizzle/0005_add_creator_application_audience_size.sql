@@ -1,0 +1,2 @@
+CREATE TYPE "public"."creator_audience_size" AS ENUM('under_1000', '1000_5000', '5000_10000', '10000_50000', '50000_100000', 'over_100000');--> statement-breakpoint
+ALTER TABLE "creator_applications" ADD COLUMN "audience_size" "creator_audience_size";

@@ -1,0 +1,1 @@
+ALTER TABLE "email_deliveries" ADD COLUMN "first_provider_attempt_at" timestamp with time zone;

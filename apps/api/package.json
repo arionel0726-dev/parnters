@@ -4,12 +4,22 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "bun --hot src/index.ts",
-    "start": "bun src/index.ts",
+    "dev": "bun --env-file=../../.env --hot src/index.ts",
+    "start": "bun --env-file=../../.env src/index.ts",
+    "bootstrap:admin": "bun --env-file=../../.env src/cli/bootstrap-admin.ts",
+    "test": "bun --env-file=../../.env test",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "hono": "latest"
+    "@hono/zod-validator": "^0.9.1",
+    "@vizaje/contracts": "workspace:*",
+    "@vizaje/db": "workspace:*",
+    "better-auth": "1.7.15",
+    "dotenv": "^18.0.9",
+    "drizzle-orm": "^0.45.4",
+    "hono": "latest",
+    "pino": "^10.4.0",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/bun": "latest",
