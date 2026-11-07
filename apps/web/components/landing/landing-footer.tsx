@@ -1,13 +1,35 @@
+"use client"
+
 import Image from "next/image"
-import { Send } from "lucide-react"
+import { useState } from "react"
+import { Send, X } from "lucide-react"
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { translations, type Locale } from "@/lib/translations"
 
-function FooterLinks({ title, links }: { title: string; links: Array<{ label: string; href: string; external?: boolean }> }) {
+const TELEGRAM_SUPPORT_URL = "https://t.me/vizaje_nica_support_bot"
+
+type FooterLink = {
+  label: string
+  href?: string
+  external?: boolean
+  dialog?: boolean
+}
+
+function FooterLinks({ title, links, onDialog }: { title: string; links: FooterLink[]; onDialog: (title: string) => void }) {
   return (
     <div data-scroll-stagger-item className="md:border-l md:border-white/20 md:pl-10 lg:pl-12">
       <p className="text-base leading-6 text-white/55 sm:text-lg">{title}</p>
       <nav className="mt-7 flex flex-col gap-4" aria-label={title}>
-        {links.map((link) => (
+        {links.map((link) => link.dialog ? (
+          <button
+            key={link.label}
+            type="button"
+            onClick={() => onDialog(link.label)}
+            className="w-fit text-left text-base leading-6 text-white/90 transition-colors hover:text-white sm:text-lg"
+          >
+            {link.label}
+          </button>
+        ) : (
           <a
             key={link.label}
             href={link.href}
@@ -43,17 +65,18 @@ function FooterWordmark({ label }: { label: string }) {
 
 export default function LandingFooter({ locale }: { locale: Locale }) {
   const copy = translations[locale]
+  const [dialogTitle, setDialogTitle] = useState<string | null>(null)
   const programLinks = [
-    { label: copy.footer.links[0], href: "#program" },
-    { label: copy.footer.links[1], href: "#contacts" },
-    { label: copy.footer.links[2], href: "#contacts" },
-    { label: copy.footer.links[3], href: "#contacts" },
+    { label: copy.footer.links[0], dialog: true },
+    { label: copy.footer.links[1], dialog: true },
+    { label: copy.footer.links[2], dialog: true },
+    { label: copy.footer.links[3], dialog: true },
   ]
   const supportLinks = [
-    { label: copy.footer.telegram, href: "https://t.me/vizaje_partners_bot", external: true },
-    { label: copy.footer.contact, href: "#contacts" },
-    { label: copy.footer.rules, href: "#program" },
-    { label: copy.footer.privacy, href: "#footer" },
+    { label: copy.footer.telegram, href: TELEGRAM_SUPPORT_URL, external: true },
+    { label: copy.footer.contact, dialog: true },
+    { label: copy.footer.rules, dialog: true },
+    { label: copy.footer.privacy, dialog: true },
   ]
 
   return (
@@ -73,18 +96,18 @@ export default function LandingFooter({ locale }: { locale: Locale }) {
             </p>
           </div>
 
-          <FooterLinks title={copy.footer.program} links={programLinks} />
-          <FooterLinks title={copy.footer.support} links={supportLinks} />
+          <FooterLinks title={copy.footer.program} links={programLinks} onDialog={setDialogTitle} />
+          <FooterLinks title={copy.footer.support} links={supportLinks} onDialog={setDialogTitle} />
         </div>
 
         <div data-scroll-reveal className="flex flex-col gap-3 border-t border-white/20 py-4 text-[11px] leading-5 text-white/65 sm:flex-row sm:items-center sm:gap-5 sm:py-5 sm:text-xs lg:text-sm">
           <span>© 2026 Vizaje-Nica. {copy.footer.copyright}</span>
           <div className="flex flex-wrap gap-x-4 gap-y-2 sm:ml-auto sm:items-center lg:gap-x-6">
-            <a href="#footer" className="transition-colors hover:text-white">{copy.footer.userAgreement}</a>
-            <a href="#footer" className="transition-colors hover:text-white">{copy.footer.privacy}</a>
-            <a href="#contacts" className="transition-colors hover:text-white">{copy.footer.supportLink}</a>
+            <button type="button" onClick={() => setDialogTitle(copy.footer.userAgreement)} className="transition-colors hover:text-white">{copy.footer.userAgreement}</button>
+            <button type="button" onClick={() => setDialogTitle(copy.footer.privacy)} className="transition-colors hover:text-white">{copy.footer.privacy}</button>
+            <button type="button" onClick={() => setDialogTitle(copy.footer.supportLink)} className="transition-colors hover:text-white">{copy.footer.supportLink}</button>
             <a
-              href="https://t.me/vizaje_partners_bot"
+              href={TELEGRAM_SUPPORT_URL}
               target="_blank"
               rel="noreferrer"
               className="inline-flex items-center gap-2 rounded-full bg-white/[0.12] px-3 py-1.5 text-white transition-colors hover:bg-white/[0.2]"
@@ -97,6 +120,21 @@ export default function LandingFooter({ locale }: { locale: Locale }) {
 
         <FooterWordmark label={copy.footer.backToTop} />
       </div>
+      <Dialog open={dialogTitle !== null} onOpenChange={(open) => { if (!open) setDialogTitle(null) }}>
+        <DialogContent showCloseButton={false} className="border-border bg-white text-ink sm:max-w-md">
+          <button
+            type="button"
+            aria-label="Закрыть"
+            onClick={() => setDialogTitle(null)}
+            className="absolute top-2 right-2 inline-flex size-7 items-center justify-center rounded-none text-ink transition-colors hover:bg-muted"
+          >
+            <X className="size-4" aria-hidden="true" />
+          </button>
+          <DialogHeader>
+            <DialogTitle className="font-sans text-lg font-medium">{dialogTitle}</DialogTitle>
+          </DialogHeader>
+        </DialogContent>
+      </Dialog>
     </footer>
   )
 }

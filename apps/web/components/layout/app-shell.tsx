@@ -15,6 +15,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   ReceiptText,
+  Send,
   UsersRound,
   WalletCards,
   X,
@@ -112,7 +113,7 @@ function Navigation({ mobile, expanded, onNavigate, partnerMode, adminRole }: { 
 }
 
 function Sidebar({ mobile = false, expanded = false, onClose, onToggle, partnerMode, adminRole }: { mobile?: boolean; expanded?: boolean; onClose?: () => void; onToggle?: () => void; partnerMode: boolean; adminRole: string }) {
-  const { locale, mode } = useDashboardLocale()
+  const { locale, mode, copy } = useDashboardLocale()
 
   return (
     <aside
@@ -158,6 +159,20 @@ function Sidebar({ mobile = false, expanded = false, onClose, onToggle, partnerM
               {expanded ? <span>Скрыть</span> : <span className="sr-only">Развернуть</span>}
             </button>
           ) : null}
+          <a
+            href="https://t.me/vizaje_nica_support_bot"
+            target="_blank"
+            rel="noreferrer"
+            className={cn(
+              "flex items-center rounded-none text-sm text-smoke transition-colors hover:bg-[#f6f6f4] hover:text-ink",
+              mobile ? "h-11 w-full gap-3 px-3" : expanded ? "h-11 w-full gap-3 px-3" : "size-12 justify-center",
+            )}
+            aria-label={`${copy.sidebar.telegram}: @vizaje_nica_support_bot`}
+            title={!mobile && !expanded ? "@vizaje_nica_support_bot" : undefined}
+          >
+            <Send className="size-[19px]" strokeWidth={1.7} aria-hidden="true" />
+            {mobile || expanded ? <span>{copy.sidebar.telegram}</span> : <span className="sr-only">{copy.sidebar.telegram}</span>}
+          </a>
           {mobile && mode === "creator" ? <LocaleSwitcher locale={locale} className="flex h-11 items-center gap-3 px-3 text-sm font-medium" /> : null}
 
           <div className={cn("flex items-center", mobile ? "gap-3 px-3" : "justify-center")}>

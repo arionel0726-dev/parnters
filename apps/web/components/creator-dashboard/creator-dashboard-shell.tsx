@@ -4,7 +4,7 @@ import { useState, useSyncExternalStore } from "react"
 import Image from "next/image"
 import Link from "next/link"
 import { usePathname, useRouter } from "next/navigation"
-import { BadgeDollarSign, LayoutDashboard, Link2, LogOut, Menu, ReceiptText, Settings, Wallet, X } from "lucide-react"
+import { BadgeDollarSign, LayoutDashboard, Link2, LogOut, Menu, ReceiptText, Send, Settings, Wallet, X } from "lucide-react"
 import type { ReactNode } from "react"
 import LocaleSwitcher from "@/components/landing/locale-switcher"
 import { NotificationBell } from "@/components/notifications/notification-bell"
@@ -87,6 +87,16 @@ export function CreatorDashboardShell({ profile, children }: { profile: CreatorP
         </nav>
 
         <div className="mt-auto">
+          <a
+            href="https://t.me/vizaje_nica_support_bot"
+            target="_blank"
+            rel="noreferrer"
+            className="vp-sidebar-link"
+            aria-label={`${copy.sidebar.telegram}: @vizaje_nica_support_bot`}
+          >
+            <Send className="size-5 shrink-0" strokeWidth={1.75} aria-hidden="true" />
+            <span>{copy.sidebar.telegram}</span>
+          </a>
           <LocaleSwitcher locale={locale} className="mb-4 flex items-center justify-center gap-3 text-sm font-medium uppercase" />
           <div className="vp-account-chip">
             <span className="vp-avatar vp-avatar-small" style={avatarStyle} aria-hidden="true">{emailInitial(profile.email, locale)}</span>
@@ -140,6 +150,17 @@ export function CreatorDashboardShell({ profile, children }: { profile: CreatorP
                 )
               })}
             </nav>
+            <a
+              href="https://t.me/vizaje_nica_support_bot"
+              target="_blank"
+              rel="noreferrer"
+              className="vp-sidebar-link"
+              aria-label={`${copy.sidebar.telegram}: @vizaje_nica_support_bot`}
+              onClick={() => setMobileMenuOpen(false)}
+            >
+              <Send className="size-5 shrink-0" strokeWidth={1.75} aria-hidden="true" />
+              <span>{copy.sidebar.telegram}</span>
+            </a>
             <div className="creator-mobile-menu-language">
               <span>{copy.profile.language}</span>
               <LocaleSwitcher locale={locale} onChange={() => setMobileMenuOpen(false)} className="flex items-center gap-3 text-sm font-medium uppercase" />

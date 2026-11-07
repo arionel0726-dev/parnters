@@ -597,14 +597,20 @@ export function ApplicationForm({ locale }: { locale: Locale }) {
                 {formError ? <p className="partners-apply__form-error" role="alert">{formError}</p> : null}
 
                 <div className={`partners-apply__actions${step === 2 ? " partners-apply__actions--step2" : ""}${step === 3 ? " apply-collab__actions" : ""}`}>
-                  {step > 1 ? (
-                    <button type="button" className="partners-apply__back" onClick={() => { setFormError(null); setErrors({}); setStep((current) => current - 1) }}>
-                      {copy.back}
-                    </button>
-                  ) : null}
                   <button type="submit" className="partners-apply__button" disabled={isSubmitting}>
                     {isSubmitting ? copy.submitting : step < 3 ? copy.continue : copy.submit}
                   </button>
+                </div>
+                <div className="partners-apply__secondary-actions">
+                  <p className="partners-apply__login-prompt">
+                    {copy.loginPrompt}{" "}
+                    <Link href="/login" className="partners-apply__login-link">{copy.loginLink}</Link>
+                  </p>
+                  {step > 1 ? (
+                    <button type="button" className="partners-apply__back-to-first" onClick={() => { setFormError(null); setErrors({}); setStep(1) }}>
+                      {copy.backToFirstStep}
+                    </button>
+                  ) : null}
                 </div>
               </form>
             </>
