@@ -57,7 +57,7 @@ function sessionCookie(response: Response) {
   return cookie.split(";", 1)[0]
 }
 
-async function localEmailSink(input: RequestInfo | URL, init?: RequestInit) {
+async function localEmailSink(input: Request | URL | string, init?: RequestInit) {
   const url = input instanceof Request ? input.url : String(input)
   if (url !== "https://api.resend.com/emails") throw new Error("Blocked non-test outbound request")
 
@@ -164,7 +164,7 @@ function restoreLoggerCalls() {
 
 beforeAll(async () => {
   process.env.RESEND_API_KEY = "re_local_test_sink_never_sent"
-  globalThis.fetch = localEmailSink
+  globalThis.fetch = localEmailSink as typeof fetch
   captureLoggerCalls()
 
   adminId = crypto.randomUUID()
@@ -270,6 +270,11 @@ describe("M3.1 creator application lifecycle", () => {
     const detailBody = await detail.json() as { emailDeliveries: Array<Record<string, unknown>> }
     expect(detailBody.emailDeliveries.every((delivery) => !("encryptedPayload" in delivery))).toBe(true)
     expect(approvedEmail.encryptedPayload).not.toContain(lifecycleEmail)
+
+    const emailQueue = await request("/v1/admin/email-deliveries?status=sent", { headers: { cookie: adminCookie } })
+    expect(emailQueue.status).toBe(200)
+    const emailQueueBody = await emailQueue.json() as { deliveries: Array<{ delivery: Record<string, unknown> }> }
+    expect(emailQueueBody.deliveries.every(({ delivery }) => !("encryptedPayload" in delivery))).toBe(true)
   })
 
   test("activates once, creates a password, logs in, and keeps retry operations admin-only", async () => {
@@ -433,8 +438,16 @@ describe("partner moderation and commission history", () => {
     const agreements = await db.select().from(partnerAgreements).where(eq(partnerAgreements.partnerId, approvedPartnerId))
     expect(agreements).toHaveLength(2)
     expect(agreements.filter((agreement) => agreement.status === "expired")).toHaveLength(1)
+    const activeAgreementList = await request("/v1/admin/agreements?status=active", { headers: { cookie: adminCookie } })
+    expect(activeAgreementList.status).toBe(200)
+    const activeAgreementBody = await activeAgreementList.json() as { agreements: Array<{ agreement: { status: string; commissionRate: string }; partner: { id: string } }> }
+    expect(activeAgreementBody.agreements).toHaveLength(1)
+    expect(activeAgreementBody.agreements[0]).toMatchObject({ agreement: { status: "active", commissionRate: "12.50" }, partner: { id: approvedPartnerId } })
     const audit = await db.select().from(auditLogs).where(eq(auditLogs.entityId, approvedPartnerId))
     expect(audit.some((entry) => entry.action === "PARTNER_STATUS_CHANGED")).toBe(true)
     expect(audit.some((entry) => entry.action === "PARTNER_COMMISSION_AGREEMENT_CREATED")).toBe(true)
+    const auditResponse = await request("/v1/admin/audit", { headers: { cookie: adminCookie } })
+    expect(auditResponse.status).toBe(200)
+    expect((await auditResponse.json() as { entries: Array<{ entityId: string | null }> }).entries.some((entry) => entry.entityId === approvedPartnerId)).toBe(true)
   })
 })

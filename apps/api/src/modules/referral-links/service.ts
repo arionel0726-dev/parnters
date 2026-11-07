@@ -1,9 +1,15 @@
 import { randomBytes } from "node:crypto"
 import { and, eq } from "drizzle-orm"
-import { auditLogs, getDb, partners, referralLinks } from "@vizaje/db"
+import { auditLogs, getDb, partners, referralLinkClicks, referralLinks } from "@vizaje/db"
 import type { ReferralLinkCreateInput, ReferralLinkRenameInput } from "@vizaje/contracts"
 import { getApiEnv } from "../../env"
 import { buildTargetUrl, parseReferralDestination } from "./destinations"
+import {
+  LegacyResolverConfigurationError,
+  LegacyResolverRejectedError,
+  parseResolverSubmission,
+  resolveLegacyTarget,
+} from "./legacy-resolver"
 import { getActiveReferralLinkByCode, getReferralLinkForPartner } from "./repository"
 
 const codeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -24,8 +30,34 @@ export function serializeReferralLink(link: typeof referralLinks.$inferSelect) {
   const env = getApiEnv()
   const shortUrl = `${env.REFERRAL_SHORT_URL_ORIGIN.replace(/\/$/, "")}/r/${link.code}`
   const targetUrl = buildTargetUrl(link)
-  const { partnerId: _partnerId, ...publicLink } = link
-  return { ...publicLink, isExpired: Boolean(link.expiresAt && link.expiresAt.getTime() <= Date.now()), shortUrl, targetUrl }
+  const {
+    partnerId: _partnerId,
+    legacyEntityId: _legacyEntityId,
+    legacyProductGuid: _legacyProductGuid,
+    preferredLocale: _preferredLocale,
+    fallbackLocale: _fallbackLocale,
+    fallbackPath: _fallbackPath,
+    canonicalRuPath: _canonicalRuPath,
+    canonicalRoPath: _canonicalRoPath,
+    resolverVersion: _resolverVersion,
+    resolvedAt: _resolvedAt,
+    ...publicLink
+  } = link
+  return { ...publicLink, isExpired: Boolean(link.expiresAt && link.expiresAt.getTime() <= Date.now()), shortUrl, targetUrl, clicks: 0, orders: 0 }
+}
+
+export async function recordReferralClick(code: string, locale: "ru" | "ro" | null) {
+  const result = await getActiveReferralLinkByCode(code)
+  if (!result?.creatorId) return null
+  await getDb().insert(referralLinkClicks).values({
+    referralLinkId: result.link.id,
+    partnerId: result.link.partnerId,
+    locale,
+    clickedAt: new Date(),
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  })
+  return result
 }
 
 export async function createReferralLink(partnerId: string, input: ReferralLinkCreateInput, actorUserId: string) {
@@ -39,7 +71,50 @@ export async function createReferralLink(partnerId: string, input: ReferralLinkC
     return { kind: "not_eligible" as const }
   }
 
-  const destination = parseReferralDestination(input.targetUrl, input.linkType)
+  const env = getApiEnv()
+  let destination: ReturnType<typeof parseReferralDestination>
+  let resolvedMetadata: {
+    legacyEntityId: string
+    legacyProductGuid: string | null
+    preferredLocale: "ru" | "ro"
+    fallbackLocale: "ru" | "ro"
+    fallbackPath: string
+    canonicalRuPath: string | null
+    canonicalRoPath: string | null
+    resolverVersion: number
+    resolvedAt: Date
+  } | undefined
+
+  if (env.LEGACY_RESOLVER_ENABLED) {
+    const submission = parseResolverSubmission(input.targetUrl, input.linkType, input.requestedLocale, {
+      allowedHosts: env.VIZAJE_DESTINATION_HOSTS,
+      nodeEnv: env.NODE_ENV,
+    })
+    const resolved = await resolveLegacyTarget(submission)
+    const fallback = resolved.targets[resolved.fallback.locale]
+    if (!fallback.available) throw new Error("Legacy resolver fallback invariant failed")
+    const fallbackUrl = new URL(fallback.url)
+    destination = {
+      targetProtocol: "https",
+      targetHost: fallbackUrl.host.toLowerCase(),
+      targetPath: resolved.fallback.path,
+    }
+    resolvedMetadata = {
+      legacyEntityId: resolved.entity.id,
+      legacyProductGuid: resolved.entity.type === "product" ? resolved.entity.sourceGuid : null,
+      preferredLocale: resolved.requestedLocale,
+      fallbackLocale: resolved.fallback.locale,
+      fallbackPath: resolved.fallback.path,
+      canonicalRuPath: resolved.targets.ru.available ? resolved.targets.ru.path : null,
+      canonicalRoPath: resolved.targets.ro.available ? resolved.targets.ro.path : null,
+      resolverVersion: resolved.contractVersion,
+      resolvedAt: new Date(resolved.resolvedAt),
+    }
+  } else {
+    // Keep the existing M4 URL validation and redirect snapshot intact until
+    // the resolver-backed flow is explicitly enabled after Legacy is ready.
+    destination = parseReferralDestination(input.targetUrl, input.linkType)
+  }
   const now = new Date()
   const expiresAt = input.expiresAt ? new Date(input.expiresAt) : null
   if (expiresAt && expiresAt <= now) return { kind: "invalid_expiry" as const }
@@ -54,6 +129,7 @@ export async function createReferralLink(partnerId: string, input: ReferralLinkC
           label: input.label ?? defaultLabel(input.linkType),
           ...destination,
           linkType: input.linkType,
+          ...(resolvedMetadata ?? {}),
           status: "active",
           expiresAt,
           createdAt: now,

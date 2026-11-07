@@ -10,6 +10,7 @@ import {
   pgEnum,
   pgTable,
   pgSequence,
+  smallint,
   text,
   timestamp,
   uniqueIndex,
@@ -37,6 +38,15 @@ export const applicationReviewActionEnum = pgEnum("application_review_action", [
 export const invitationStatusEnum = pgEnum("invitation_status", ["pending", "accepted", "expired", "revoked"])
 export const referralLinkTypeEnum = pgEnum("referral_link_type", ["homepage", "product", "category", "brand"])
 export const referralLinkStatusEnum = pgEnum("referral_link_status", ["active", "revoked"])
+export const referralOrderStatusEnum = pgEnum("referral_order_status", ["confirmed", "cancelled"])
+export const payoutStatusEnum = pgEnum("payout_status", ["requested", "approved", "paid", "rejected", "cancelled"])
+export const notificationTypeEnum = pgEnum("notification_type", [
+  "creator_application_submitted",
+  "creator_application_approved",
+  "creator_application_rejected",
+  "partner_commission_changed",
+  "partner_status_changed",
+])
 
 export const creatorIdSequence = pgSequence("creator_id_seq", { startWith: 1 })
 
@@ -116,6 +126,15 @@ export const referralLinks = pgTable(
     targetHost: text("target_host").notNull(),
     targetPath: text("target_path").notNull(),
     linkType: referralLinkTypeEnum("link_type").notNull(),
+    legacyEntityId: text("legacy_entity_id"),
+    legacyProductGuid: text("legacy_product_guid"),
+    preferredLocale: applicationLocaleEnum("preferred_locale"),
+    fallbackLocale: applicationLocaleEnum("fallback_locale"),
+    fallbackPath: text("fallback_path"),
+    canonicalRuPath: text("canonical_ru_path"),
+    canonicalRoPath: text("canonical_ro_path"),
+    resolverVersion: smallint("resolver_version"),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
     status: referralLinkStatusEnum("status").notNull().default("active"),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     expiresAt: timestamp("expires_at", { withTimezone: true }),
@@ -126,6 +145,107 @@ export const referralLinks = pgTable(
     index("referral_links_partner_idx").on(table.partnerId),
     index("referral_links_status_idx").on(table.status),
     check("referral_links_target_protocol_check", sql`${table.targetProtocol} in ('http', 'https')`),
+  ],
+)
+
+export const referralLinkClicks = pgTable(
+  "referral_link_clicks",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    referralLinkId: uuid("referral_link_id")
+      .notNull()
+      .references(() => referralLinks.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    partnerId: uuid("partner_id")
+      .notNull()
+      .references(() => partners.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    locale: applicationLocaleEnum("locale"),
+    clickedAt: timestamp("clicked_at", { withTimezone: true }).defaultNow().notNull(),
+    ...timestamps,
+  },
+  (table) => [
+    index("referral_link_clicks_link_idx").on(table.referralLinkId, table.clickedAt),
+    index("referral_link_clicks_partner_idx").on(table.partnerId, table.clickedAt),
+  ],
+)
+
+export const referralOrders = pgTable(
+  "referral_orders",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    eventId: uuid("event_id").notNull(),
+    orderId: text("order_id").notNull(),
+    referralLinkId: uuid("referral_link_id")
+      .notNull()
+      .references(() => referralLinks.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    partnerId: uuid("partner_id")
+      .notNull()
+      .references(() => partners.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    creatorId: text("creator_id").notNull(),
+    amount: numeric("amount", { precision: 12, scale: 2 }).notNull(),
+    currency: text("currency").notNull(),
+    commissionRate: numeric("commission_rate", { precision: 5, scale: 2 }).notNull().default("0"),
+    commissionAmount: numeric("commission_amount", { precision: 12, scale: 2 }).notNull().default("0"),
+    status: referralOrderStatusEnum("status").notNull().default("confirmed"),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex("referral_orders_event_unique").on(table.eventId),
+    uniqueIndex("referral_orders_order_unique").on(table.orderId),
+    index("referral_orders_partner_idx").on(table.partnerId, table.occurredAt),
+    index("referral_orders_link_idx").on(table.referralLinkId, table.occurredAt),
+  ],
+)
+
+export const payouts = pgTable(
+  "payouts",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    partnerId: uuid("partner_id")
+      .notNull()
+      .references(() => partners.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    amount: numeric("amount", { precision: 12, scale: 2 }).notNull(),
+    currency: text("currency").notNull(),
+    idempotencyKey: text("idempotency_key"),
+    status: payoutStatusEnum("status").notNull().default("requested"),
+    requestedAt: timestamp("requested_at", { withTimezone: true }).defaultNow().notNull(),
+    processedAt: timestamp("processed_at", { withTimezone: true }),
+    processedByUserId: uuid("processed_by_user_id").references(() => users.id, { onDelete: "set null", onUpdate: "cascade" }),
+    rejectionReason: text("rejection_reason"),
+    ...timestamps,
+  },
+  (table) => [
+    index("payouts_partner_idx").on(table.partnerId, table.requestedAt),
+    index("payouts_status_idx").on(table.status, table.requestedAt),
+    uniqueIndex("payouts_partner_idempotency_key_unique").on(table.partnerId, table.idempotencyKey),
+    check("payouts_amount_positive", sql`${table.amount} > 0`),
+  ],
+)
+
+export const passwordResetDeliveries = pgTable(
+  "password_reset_deliveries",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    eventKey: text("event_key").notNull(),
+    recipientEmail: text("recipient_email").notNull(),
+    encryptedPayload: text("encrypted_payload").notNull(),
+    status: emailDeliveryStatusEnum("status").notNull().default("queued"),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
+    lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
+    firstProviderAttemptAt: timestamp("first_provider_attempt_at", { withTimezone: true }),
+    sentAt: timestamp("sent_at", { withTimezone: true }),
+    providerMessageId: text("provider_message_id"),
+    lastError: text("last_error"),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex("password_reset_deliveries_event_key_unique").on(table.eventKey),
+    index("password_reset_deliveries_user_idx").on(table.userId),
+    index("password_reset_deliveries_due_idx").on(table.status, table.nextAttemptAt),
   ],
 )
 
@@ -303,6 +423,35 @@ export const auditLogs = pgTable(
   ],
 )
 
+export type NotificationMetadata = {
+  href?: string
+  entityId?: string
+  locale?: "ru" | "ro"
+  status?: "active" | "suspended" | "banned"
+}
+
+export const notifications = pgTable(
+  "notifications",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    recipientUserId: uuid("recipient_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    eventKey: text("event_key").notNull(),
+    type: notificationTypeEnum("type").notNull(),
+    title: text("title").notNull(),
+    message: text("message").notNull(),
+    metadata: jsonb("metadata").$type<NotificationMetadata>().notNull().default({}),
+    readAt: timestamp("read_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("notifications_recipient_event_unique").on(table.recipientUserId, table.eventKey),
+    index("notifications_recipient_created_idx").on(table.recipientUserId, table.createdAt),
+    index("notifications_recipient_unread_idx").on(table.recipientUserId, table.readAt, table.createdAt),
+  ],
+)
+
 export const authSessions = pgTable(
   "sessions",
   {
@@ -373,6 +522,13 @@ export type PartnerAccount = typeof partnerAccounts.$inferSelect
 export type NewPartnerAccount = typeof partnerAccounts.$inferInsert
 export type ReferralLink = typeof referralLinks.$inferSelect
 export type NewReferralLink = typeof referralLinks.$inferInsert
+export type ReferralLinkClick = typeof referralLinkClicks.$inferSelect
+export type NewReferralLinkClick = typeof referralLinkClicks.$inferInsert
+export type ReferralOrder = typeof referralOrders.$inferSelect
+export type NewReferralOrder = typeof referralOrders.$inferInsert
+export type Payout = typeof payouts.$inferSelect
+export type NewPayout = typeof payouts.$inferInsert
+export type PasswordResetDelivery = typeof passwordResetDeliveries.$inferSelect
 export type ApiRateLimit = typeof apiRateLimits.$inferSelect
 export type CreatorApplication = typeof creatorApplications.$inferSelect
 export type NewCreatorApplication = typeof creatorApplications.$inferInsert
@@ -385,6 +541,8 @@ export type PartnerAgreement = typeof partnerAgreements.$inferSelect
 export type NewPartnerAgreement = typeof partnerAgreements.$inferInsert
 export type AuditLog = typeof auditLogs.$inferSelect
 export type NewAuditLog = typeof auditLogs.$inferInsert
+export type Notification = typeof notifications.$inferSelect
+export type NewNotification = typeof notifications.$inferInsert
 export type AuthSession = typeof authSessions.$inferSelect
 export type AuthAccount = typeof authAccounts.$inferSelect
 export type AuthVerification = typeof authVerifications.$inferSelect

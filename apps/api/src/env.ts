@@ -17,6 +17,15 @@ const envSchema = z.object({
   RESEND_API_KEY: z.preprocess((value) => value === "" ? undefined : value, z.string().optional()),
   EMAIL_FROM: z.string().min(3).default("Vizaje Partners <partners@vizaje-nica.com>"),
   WEB_APP_URL: z.string().url().default("http://localhost:3000"),
+  LEGACY_RESOLVER_ENABLED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
+  CREATOR_FINANCE_ENABLED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
+  PAYOUTS_ENABLED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
+  REFERRAL_TRACKING_ENABLED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
+  AUDIT_TECHNICAL_RETENTION_DAYS: z.coerce.number().int().positive().default(4),
+  AUDIT_BUSINESS_RETENTION_DAYS: z.coerce.number().int().positive().default(365),
+  AUDIT_FINANCIAL_RETENTION_DAYS: z.coerce.number().int().positive().default(2555),
+  LEGACY_INTERNAL_BASE_URL: z.preprocess((value) => value === "" ? undefined : value, z.string().url().optional()),
+  LEGACY_RESOLVER_HMAC_KEYS: z.preprocess((value) => value === "" ? undefined : value, z.string().optional()),
 })
 
 export function getApiEnv() {
@@ -32,6 +41,15 @@ export function getApiEnv() {
     RESEND_API_KEY: process.env.RESEND_API_KEY,
     EMAIL_FROM: process.env.EMAIL_FROM,
     WEB_APP_URL: process.env.WEB_APP_URL,
+    LEGACY_RESOLVER_ENABLED: process.env.LEGACY_RESOLVER_ENABLED,
+    CREATOR_FINANCE_ENABLED: process.env.CREATOR_FINANCE_ENABLED,
+    PAYOUTS_ENABLED: process.env.PAYOUTS_ENABLED,
+    REFERRAL_TRACKING_ENABLED: process.env.REFERRAL_TRACKING_ENABLED,
+    AUDIT_TECHNICAL_RETENTION_DAYS: process.env.AUDIT_TECHNICAL_RETENTION_DAYS,
+    AUDIT_BUSINESS_RETENTION_DAYS: process.env.AUDIT_BUSINESS_RETENTION_DAYS,
+    AUDIT_FINANCIAL_RETENTION_DAYS: process.env.AUDIT_FINANCIAL_RETENTION_DAYS,
+    LEGACY_INTERNAL_BASE_URL: process.env.LEGACY_INTERNAL_BASE_URL,
+    LEGACY_RESOLVER_HMAC_KEYS: process.env.LEGACY_RESOLVER_HMAC_KEYS,
   })
 
   return {

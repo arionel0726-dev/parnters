@@ -10,6 +10,11 @@
     "dev:web": "bun run --cwd apps/web dev",
     "dev:api": "bun run --cwd apps/api dev",
     "build:web": "bun run --cwd apps/web build",
+    "test:api": "bun run --cwd apps/api test",
+    "test:api:unit": "bun run --cwd apps/api test:unit",
+    "test:api:typecheck": "bun run --cwd apps/api test:typecheck",
+    "test:e2e": "playwright test",
+    "test:e2e:list": "playwright test --list",
     "typecheck": "bun run --cwd packages/contracts typecheck && bun run --cwd packages/db typecheck && bun run --cwd apps/api typecheck && bun run --cwd apps/web typecheck",
     "db:generate": "bun run --cwd packages/db db:generate",
     "db:check": "bun run --cwd packages/db db:check",
@@ -17,6 +22,7 @@
     "db:studio": "bun run --cwd packages/db db:studio"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.1",
     "@tailwindcss/postcss": "^4"
   }
 }

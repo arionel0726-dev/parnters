@@ -1,13 +1,34 @@
 "use client"
 
-import { useCallback, useEffect, useState, type FormEvent } from "react"
-import { Check, Copy, Download, ExternalLink, Link2, Pencil, QrCode, X } from "lucide-react"
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react"
 import Image from "next/image"
+import {
+  Check,
+  ChevronRight,
+  CircleDot,
+  Copy,
+  Download,
+  ExternalLink,
+  Link2,
+  MoreHorizontal,
+  Pencil,
+  QrCode,
+  Search,
+  SlidersHorizontal,
+  X,
+} from "lucide-react"
+import { referralLinkCreateSchema, type ReferralLinkCreateInput } from "@vizaje/contracts"
 import { CreatorPageHeader } from "@/components/creator-dashboard/dashboard-ui"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
+import { CreatorLinksSkeleton } from "@/components/ui/page-skeletons"
+import { useDashboardLocale } from "@/components/dashboard/dashboard-locale-provider"
+import { dashboardTranslations, type DashboardCopy } from "@/lib/dashboard-translations"
 
-type LinkType = "homepage" | "product" | "category" | "brand"
+type LinkType = ReferralLinkCreateInput["linkType"]
 type LinkStatus = "active" | "revoked"
+type StatusFilter = "all" | "active" | "revoked" | "expired"
+
 type ReferralLink = {
   id: string
   code: string
@@ -23,122 +44,178 @@ type ReferralLink = {
   isExpired: boolean
   shortUrl: string
   targetUrl: string
-}
-type LinkResult = { links: ReferralLink[] }
-
-const typeLabels: Record<LinkType, string> = {
-  homepage: "Главная",
-  product: "Товар",
-  category: "Категория",
-  brand: "Бренд",
+  clicks: number
+  orders: number
 }
 
-const typeHints: Record<LinkType, string> = {
-  homepage: "Главная страница или локализованная главная",
-  product: "Страница товара в разделе products",
-  category: "Страница категории в разделе categories",
-  brand: "Страница бренда в разделе brands",
+type LinkCopy = DashboardCopy["links"]
+type ApiErrorBody = { error?: { message?: string } }
+
+function formatDate(value: string, locale: "ru" | "ro") {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return "—"
+  return new Intl.DateTimeFormat(locale === "ro" ? "ro-RO" : "ru-RU", { dateStyle: "medium" }).format(date)
 }
 
-function formatDate(value: string) {
-  return new Intl.DateTimeFormat("ru-RU", { dateStyle: "medium" }).format(new Date(value))
+function isLinkAvailable(link: ReferralLink) {
+  return link.status === "active" && !link.isExpired
+}
+
+function shortPath(shortUrl: string, code: string) {
+  try {
+    return new URL(shortUrl).pathname || `/r/${code}`
+  } catch {
+    return shortUrl || `/r/${code}`
+  }
+}
+
+function targetLocale(path: string) {
+  const segment = path.split("/").find((value) => value === "ru" || value === "ro")
+  return segment?.toUpperCase() ?? "RU/RO"
+}
+
+function linkStatusLabel(link: ReferralLink, copy: LinkCopy) {
+  if (link.status === "revoked") return { label: copy.revoked, className: "is-revoked" }
+  if (link.isExpired) return { label: copy.statusExpired, className: "is-expired" }
+  return { label: copy.active, className: "is-active" }
+}
+
+async function readError(response: Response, fallback: string) {
+  try {
+    const body = await response.json() as ApiErrorBody
+    return body.error?.message || fallback
+  } catch {
+    return fallback
+  }
 }
 
 export function PartnerLinksPage() {
+  const { locale, mode, copy } = useDashboardLocale()
+  const linkCopy: LinkCopy = mode === "admin" ? dashboardTranslations.ru.creator.links : copy.links
   const [links, setLinks] = useState<ReferralLink[]>([])
-  const [status, setStatus] = useState<"all" | LinkStatus>("all")
+  const [loadState, setLoadState] = useState<"loading" | "ready" | "error">("loading")
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
+  const [search, setSearch] = useState("")
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all")
+  const [typeFilter, setTypeFilter] = useState<"all" | LinkType>("all")
+  const [filtersOpen, setFiltersOpen] = useState(false)
+
+  const [createOpen, setCreateOpen] = useState(false)
   const [linkType, setLinkType] = useState<LinkType>("homepage")
   const [targetUrl, setTargetUrl] = useState("")
   const [label, setLabel] = useState("")
   const [expiresAt, setExpiresAt] = useState("")
-  const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [createError, setCreateError] = useState<string | null>(null)
+  const [createTargetInvalid, setCreateTargetInvalid] = useState(false)
+  const [createdLink, setCreatedLink] = useState<ReferralLink | null>(null)
+
   const [copiedId, setCopiedId] = useState<string | null>(null)
   const [qrLink, setQrLink] = useState<ReferralLink | null>(null)
   const [renameLink, setRenameLink] = useState<ReferralLink | null>(null)
   const [renameLabel, setRenameLabel] = useState("")
   const [renaming, setRenaming] = useState(false)
+  const [revokeLink, setRevokeLink] = useState<ReferralLink | null>(null)
+  const [revoking, setRevoking] = useState(false)
 
   const load = useCallback(async () => {
-    setLoading(true)
-    setError(null)
-    const query = status === "all" ? "" : `?status=${status}`
     try {
-      const response = await fetch(`/api/partner/referral-links${query}`, { cache: "no-store" })
-      const body = await response.json() as LinkResult & { error?: { message?: string } }
-      if (!response.ok) throw new Error(body.error?.message ?? "Не удалось загрузить ссылки.")
+      const response = await fetch("/api/partner/referral-links?status=all", { cache: "no-store" })
+      if (!response.ok) throw new Error(await readError(response, linkCopy.loadError))
+      const body = await response.json() as { links?: ReferralLink[] }
+      if (!Array.isArray(body.links)) throw new Error(linkCopy.loadError)
       setLinks(body.links)
-    } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Не удалось загрузить ссылки.")
-    } finally {
-      setLoading(false)
+      setLoadState("ready")
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : linkCopy.loadError)
+      setLoadState("error")
     }
-  }, [status])
+  }, [linkCopy])
 
   useEffect(() => {
-    const timer = window.setTimeout(() => { void load() }, 0)
-    return () => window.clearTimeout(timer)
+    void Promise.resolve().then(load)
   }, [load])
+
+  const counts = useMemo(() => ({
+    total: links.length,
+    active: links.filter((link) => isLinkAvailable(link)).length,
+    revoked: links.filter((link) => link.status === "revoked").length,
+  }), [links])
+
+  const filteredLinks = useMemo(() => {
+    const query = search.trim().toLocaleLowerCase(locale === "ro" ? "ro-RO" : "ru-RU")
+    return links.filter((link) => {
+      const matchesStatus = statusFilter === "all"
+        || (statusFilter === "active" && isLinkAvailable(link))
+        || (statusFilter === "revoked" && link.status === "revoked")
+        || (statusFilter === "expired" && link.status === "active" && link.isExpired)
+      const matchesType = typeFilter === "all" || link.linkType === typeFilter
+      if (!matchesStatus) return false
+      if (!matchesType) return false
+      if (!query) return true
+      return [link.label, link.shortUrl, link.targetUrl, link.code].some((value) => value.toLocaleLowerCase(locale === "ro" ? "ro-RO" : "ru-RU").includes(query))
+    })
+  }, [links, locale, search, statusFilter, typeFilter])
+
+  function resetCreateForm() {
+    setLinkType("homepage")
+    setTargetUrl("")
+    setLabel("")
+    setExpiresAt("")
+    setCreateError(null)
+    setCreateTargetInvalid(false)
+  }
 
   async function createLink(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    if (saving) return
+    setCreateError(null)
+    setCreateTargetInvalid(false)
+
+    let expiry: string | undefined
+    if (expiresAt) {
+      const date = new Date(expiresAt)
+      if (Number.isNaN(date.getTime()) || date.getTime() <= Date.now()) {
+        setCreateError(linkCopy.invalidExpiry)
+        return
+      }
+      expiry = date.toISOString()
+    }
+
+    const payload = {
+      linkType,
+      targetUrl: targetUrl.trim(),
+      requestedLocale: locale,
+      ...(label.trim() ? { label: label.trim() } : {}),
+      ...(expiry ? { expiresAt: expiry } : {}),
+    }
+    const parsed = referralLinkCreateSchema.safeParse(payload)
+    if (!parsed.success) {
+      setCreateError(linkCopy.destinationError)
+      setCreateTargetInvalid(true)
+      return
+    }
+
     setSaving(true)
-    setError(null)
     try {
-      const bodyData: { linkType: LinkType; targetUrl: string; label?: string; expiresAt?: string } = { linkType, targetUrl }
-      if (label.trim()) bodyData.label = label.trim()
-      if (expiresAt) bodyData.expiresAt = new Date(expiresAt).toISOString()
       const response = await fetch("/api/partner/referral-links", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(bodyData),
+        body: JSON.stringify(parsed.data),
       })
-      const body = await response.json() as { link?: ReferralLink; error?: { message?: string } }
-      if (!response.ok || !body.link) throw new Error(body.error?.message ?? "Не удалось создать ссылку.")
-      setTargetUrl("")
-      setLabel("")
-      setExpiresAt("")
-      setLinks((current) => [body.link!, ...current])
-    } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : "Не удалось создать ссылку.")
+      if (!response.ok) throw new Error(await readError(response, linkCopy.createError))
+      const body = await response.json() as { link?: ReferralLink }
+      if (!body.link) throw new Error(linkCopy.createError)
+      setLinks((current) => [body.link!, ...current.filter((link) => link.id !== body.link!.id)])
+      setCreatedLink(body.link)
+      setCreateOpen(false)
+      resetCreateForm()
+    } catch (error) {
+      setCreateError(error instanceof Error ? error.message : linkCopy.createError)
+      setCreateTargetInvalid(false)
     } finally {
       setSaving(false)
-    }
-  }
-
-  async function revokeLink(link: ReferralLink) {
-    if (link.status === "revoked" || !window.confirm("Отозвать эту ссылку? Она перестанет перенаправлять на Vizaje-Nica.")) return
-    setError(null)
-    try {
-      const response = await fetch(`/api/partner/referral-links/${link.id}/revoke`, { method: "PATCH" })
-      const body = await response.json() as { link?: ReferralLink; error?: { message?: string } }
-      if (!response.ok || !body.link) throw new Error(body.error?.message ?? "Не удалось отозвать ссылку.")
-      setLinks((current) => current.map((item) => item.id === body.link!.id ? body.link! : item))
-    } catch (revokeError) {
-      setError(revokeError instanceof Error ? revokeError.message : "Не удалось отозвать ссылку.")
-    }
-  }
-
-  async function saveRename(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    if (!renameLink) return
-    setRenaming(true)
-    setError(null)
-    try {
-      const response = await fetch(`/api/partner/referral-links/${renameLink.id}`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ label: renameLabel }),
-      })
-      const body = await response.json() as { link?: ReferralLink; error?: { message?: string } }
-      if (!response.ok || !body.link) throw new Error(body.error?.message ?? "Не удалось переименовать ссылку.")
-      setLinks((current) => current.map((item) => item.id === body.link!.id ? body.link! : item))
-      setRenameLink(null)
-    } catch (renameError) {
-      setError(renameError instanceof Error ? renameError.message : "Не удалось переименовать ссылку.")
-    } finally {
-      setRenaming(false)
     }
   }
 
@@ -148,104 +225,350 @@ export function PartnerLinksPage() {
       setCopiedId(link.id)
       window.setTimeout(() => setCopiedId((current) => current === link.id ? null : current), 1600)
     } catch {
-      setError("Браузер не разрешил копирование. Скопируйте короткую ссылку вручную.")
+      setActionError(linkCopy.copyError)
     }
   }
 
+  async function saveRename(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!renameLink || renaming) return
+    setRenaming(true)
+    setActionError(null)
+    try {
+      const response = await fetch(`/api/partner/referral-links/${renameLink.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ label: renameLabel.trim() }),
+      })
+      if (!response.ok) throw new Error(await readError(response, linkCopy.renameError))
+      const body = await response.json() as { link?: ReferralLink }
+      if (!body.link) throw new Error(linkCopy.renameError)
+      setLinks((current) => current.map((link) => link.id === body.link!.id ? body.link! : link))
+      setRenameLink(null)
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : linkCopy.actionError)
+    } finally {
+      setRenaming(false)
+    }
+  }
+
+  async function confirmRevoke() {
+    if (!revokeLink || revoking || revokeLink.status === "revoked") return
+    setRevoking(true)
+    setActionError(null)
+    try {
+      const response = await fetch(`/api/partner/referral-links/${revokeLink.id}/revoke`, { method: "PATCH" })
+      if (!response.ok) throw new Error(await readError(response, linkCopy.revokeError))
+      const body = await response.json() as { link?: ReferralLink }
+      if (!body.link) throw new Error(linkCopy.revokeError)
+      setLinks((current) => current.map((link) => link.id === body.link!.id ? body.link! : link))
+      setRevokeLink(null)
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : linkCopy.actionError)
+    } finally {
+      setRevoking(false)
+    }
+  }
+
+  function openCreate() {
+    setActionError(null)
+    resetCreateForm()
+    setCreateOpen(true)
+  }
+
+  function statusText(link: ReferralLink) {
+    return linkStatusLabel(link, linkCopy)
+  }
+
+  function actionButtons(link: ReferralLink, mobile = false) {
+    const available = isLinkAvailable(link)
+    const openRename = () => { setRenameLink(link); setRenameLabel(link.label); setActionError(null) }
+    const openRevoke = () => { setRevokeLink(link); setActionError(null) }
+
+    if (mobile) {
+      return (
+        <DropdownMenu>
+          <DropdownMenuTrigger render={<button type="button" className="partner-links-mobile-next" aria-label={`${linkCopy.tableActions}: ${link.label}`}><ChevronRight aria-hidden="true" /></button>} />
+          <DropdownMenuContent align="end" className="w-48">
+            <DropdownMenuItem onClick={() => setQrLink(link)} disabled={!available}><QrCode aria-hidden="true" />{linkCopy.qr}</DropdownMenuItem>
+            <DropdownMenuItem onClick={openRename}><Pencil aria-hidden="true" />{linkCopy.rename}</DropdownMenuItem>
+            {link.status === "active" ? <DropdownMenuItem variant="destructive" onClick={openRevoke}><X aria-hidden="true" />{linkCopy.revoke}</DropdownMenuItem> : null}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )
+    }
+
+    return (
+      <div className="partner-links-actions">
+        <button type="button" className="partner-links-icon-button" onClick={() => void copyLink(link)} disabled={!available} aria-label={`${copiedId === link.id ? linkCopy.copied : linkCopy.copy}: ${link.shortUrl}`} title={copiedId === link.id ? linkCopy.copied : linkCopy.copy}>
+          {copiedId === link.id ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
+        </button>
+        <button type="button" className="partner-links-icon-button" onClick={() => setQrLink(link)} disabled={!available} aria-label={`${linkCopy.qr}: ${link.label}`} title={linkCopy.qr}>
+          <QrCode aria-hidden="true" />
+        </button>
+        <a className="partner-links-icon-button" href={link.shortUrl} target="_blank" rel="noreferrer" aria-label={linkCopy.openShortLink.replace("{label}", link.label)} title={linkCopy.openShortLink.replace("{label}", link.label)}>
+          <ExternalLink aria-hidden="true" />
+        </a>
+        <DropdownMenu>
+          <DropdownMenuTrigger render={<button type="button" className="partner-links-icon-button" aria-label={`${linkCopy.tableActions}: ${link.label}`} title={linkCopy.tableActions}><MoreHorizontal aria-hidden="true" /></button>} />
+          <DropdownMenuContent align="end" className="w-48">
+            <DropdownMenuItem onClick={openRename}><Pencil aria-hidden="true" />{linkCopy.rename}</DropdownMenuItem>
+            {link.status === "active" ? <DropdownMenuItem variant="destructive" onClick={openRevoke}><X aria-hidden="true" />{linkCopy.revoke}</DropdownMenuItem> : null}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+    )
+  }
+
+  const createAction = (
+    <button type="button" className="vp-button partner-links-create-button" onClick={openCreate}>
+      <Link2 aria-hidden="true" />{linkCopy.createAction}
+    </button>
+  )
+
   return (
-    <section className="min-h-[calc(100vh-64px)] px-5 py-8 text-foreground sm:px-8 sm:py-10 lg:px-10">
-      <div className="mx-auto max-w-[1120px]">
-        <CreatorPageHeader eyebrow="Кабинет креатора" title="Мои ссылки" description="Создавайте короткие ссылки на разрешённые страницы Vizaje-Nica. Статистика кликов и заказов пока не подключена." />
+    <section className="partner-links-page creator-dashboard-surface">
+      <div className="partner-links-container">
+        <CreatorPageHeader title={linkCopy.title} description={linkCopy.description} action={createAction} />
 
-        <form onSubmit={createLink} className="mt-7 border border-border bg-card p-5 sm:p-6">
-          <div className="flex items-center gap-3"><div className="flex size-9 items-center justify-center border border-border bg-muted"><Link2 className="size-4" aria-hidden="true" /></div><div><h2 className="text-base font-medium">Новая ссылка</h2><p className="mt-1 text-xs text-muted-foreground">Только разрешённые hosts и RU/RO пути.</p></div></div>
-          <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-[180px_1fr_220px]">
-            <label className="block text-sm"><span className="font-medium">Тип</span><select value={linkType} onChange={(event) => setLinkType(event.target.value as LinkType)} className="mt-2 h-11 w-full border border-input bg-background px-3 text-sm outline-none focus:border-foreground">{Object.entries(typeLabels).map(([value, name]) => <option key={value} value={value}>{name}</option>)}</select></label>
-            <label className="block text-sm sm:col-span-2 lg:col-span-1"><span className="font-medium">Ссылка Vizaje-Nica</span><input value={targetUrl} onChange={(event) => setTargetUrl(event.target.value)} className="mt-2 h-11 w-full border border-input bg-background px-3 text-sm outline-none placeholder:text-muted-foreground focus:border-foreground" placeholder="https://vizaje-nica.com/ro/" required /><span className="mt-2 block text-xs text-muted-foreground">{typeHints[linkType]}</span></label>
-            <label className="block text-sm"><span className="font-medium">Внутреннее название</span><input value={label} onChange={(event) => setLabel(event.target.value)} maxLength={80} className="mt-2 h-11 w-full border border-input bg-background px-3 text-sm outline-none placeholder:text-muted-foreground focus:border-foreground" placeholder="Например, сыворотка для лица" /><span className="mt-2 block text-xs text-muted-foreground">Не отображается в публичной ссылке.</span></label>
-            <label className="block text-sm"><span className="font-medium">Срок действия</span><input type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} className="mt-2 h-11 w-full border border-input bg-background px-3 text-sm outline-none focus:border-foreground" /><span className="mt-2 block text-xs text-muted-foreground">Необязательно; дата в прошлом не принимается.</span></label>
-            <div className="flex items-end sm:col-span-2 lg:col-span-1"><button type="submit" disabled={saving} className="h-11 w-full bg-primary px-5 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-85 disabled:opacity-50">{saving ? "Создаём..." : "Создать ссылку"}</button></div>
+        <section className="partner-links-summary" aria-label={linkCopy.savedTitle}>
+          <SummaryCard icon={Link2} label={linkCopy.summaryTotal} value={loadState === "ready" ? counts.total : "—"} />
+          <SummaryCard icon={CircleDot} tone="active" label={linkCopy.summaryActive} value={loadState === "ready" ? counts.active : "—"} />
+          <SummaryCard icon={CircleDot} tone="muted" label={linkCopy.summaryRevoked} value={loadState === "ready" ? counts.revoked : "—"} />
+        </section>
+
+        <div className="partner-links-toolbar">
+          <label className="partner-links-search">
+            <span className="sr-only">{linkCopy.searchPlaceholder}</span>
+            <Search aria-hidden="true" />
+            <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={linkCopy.searchPlaceholder} type="search" />
+          </label>
+          <div className="partner-links-filter-group partner-links-filter-desktop">
+            <label className="partner-links-filter">
+              <span className="sr-only">{linkCopy.filterType}</span>
+              <select value={typeFilter} aria-label={linkCopy.filterType} onChange={(event) => setTypeFilter(event.target.value as "all" | LinkType)}>
+                <option value="all">{linkCopy.typeAll}</option>
+                {Object.entries(linkCopy.types).map(([value, name]) => <option key={value} value={value}>{name}</option>)}
+              </select>
+            </label>
+            <label className="partner-links-filter">
+              <span className="sr-only">{linkCopy.filterStatus}</span>
+              <select value={statusFilter} aria-label={linkCopy.filterStatus} onChange={(event) => setStatusFilter(event.target.value as StatusFilter)}>
+                <option value="all">{linkCopy.statusAll}</option>
+                <option value="active">{linkCopy.active}</option>
+                <option value="revoked">{linkCopy.revoked}</option>
+                <option value="expired">{linkCopy.statusExpired}</option>
+              </select>
+            </label>
           </div>
-        </form>
-
-        <div className="mt-9 flex flex-col gap-4 border-b border-border pb-4 sm:flex-row sm:items-end sm:justify-between"><div><h2 className="text-xl font-medium tracking-[-0.02em]">Сохранённые ссылки</h2><p className="mt-1 text-xs text-muted-foreground">{links.length ? `${links.length} в этом списке` : "Список обновляется из базы данных"}</p></div><label className="flex items-center gap-3 text-sm text-muted-foreground"><span>Показать</span><select value={status} onChange={(event) => setStatus(event.target.value as "all" | LinkStatus)} aria-label="Фильтр ссылок" className="h-10 border border-input bg-background px-3 text-sm text-foreground outline-none focus:border-foreground"><option value="all">Все</option><option value="active">Активные</option><option value="revoked">Отозванные</option></select></label></div>
-
-        {error ? <p className="mt-5 border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive" role="alert">{error}</p> : null}
-        <div className="mt-5 space-y-3">
-          {loading ? <div className="border border-border px-4 py-12 text-center text-sm text-muted-foreground" role="status">Загрузка ссылок...</div> : null}
-          {!loading && !links.length ? <div className="border border-border px-4 py-12 text-center text-sm text-muted-foreground">Создайте первую ссылку, чтобы начать.</div> : null}
-          {!loading ? links.map((link) => {
-            const available = link.status === "active" && !link.isExpired
-            const statusLabel = link.status === "revoked" ? "Отозвана" : link.isExpired ? "Срок истёк" : "Активна"
-            return (
-              <article key={link.id} className="border border-border bg-card p-4 sm:p-5">
-                <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-3">
-                      <h3 className="max-w-full truncate text-base font-medium">{link.label}</h3>
-                      <span className="text-xs uppercase tracking-[0.12em] text-muted-foreground">{typeLabels[link.linkType]}</span>
-                      <span className={`inline-flex items-center gap-2 text-xs ${available ? "text-[#15803d]" : "text-muted-foreground"}`}><span className={`size-2 rounded-full ${available ? "bg-[#15803d]" : "bg-muted-foreground/60"}`} />{statusLabel}</span>
-                    </div>
-                    <a href={link.targetUrl} target="_blank" rel="noreferrer" className="mt-3 flex max-w-full items-center gap-2 text-sm font-medium hover:underline"><span className="truncate">{link.targetHost}{link.targetPath}</span><ExternalLink className="size-3.5 shrink-0 text-muted-foreground" /></a>
-                    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground"><span>Создана {formatDate(link.createdAt)}</span>{link.expiresAt ? <span>{link.isExpired ? "Истекла" : "Истекает"} {formatDate(link.expiresAt)}</span> : null}<span className="font-mono">Код {link.code}</span></div>
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2 lg:justify-end">
-                    <button type="button" onClick={() => { setRenameLink(link); setRenameLabel(link.label) }} className="inline-flex h-10 items-center gap-2 border border-border px-3 text-xs font-medium hover:bg-muted"><Pencil className="size-3.5" />Название</button>
-                    <button type="button" onClick={() => void copyLink(link)} disabled={!available} className="inline-flex h-10 items-center gap-2 border border-border px-3 text-xs font-medium hover:bg-muted disabled:opacity-40">{copiedId === link.id ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}{copiedId === link.id ? "Скопировано" : "Копировать"}</button>
-                    <button type="button" onClick={() => setQrLink(link)} disabled={!available} className="inline-flex h-10 items-center gap-2 border border-border px-3 text-xs font-medium hover:bg-muted disabled:opacity-40"><QrCode className="size-3.5" />QR</button>
-                    {link.status === "active" ? <button type="button" onClick={() => void revokeLink(link)} className="inline-flex h-10 items-center gap-2 border border-destructive/30 px-3 text-xs font-medium text-destructive hover:bg-destructive/5"><X className="size-3.5" />Отозвать</button> : null}
-                  </div>
-                </div>
-                <div className="mt-4 flex flex-col gap-2 border-t border-border pt-3 text-xs sm:flex-row sm:items-center sm:justify-between"><span className="text-muted-foreground">Короткая ссылка</span><a href={link.shortUrl} target="_blank" rel="noreferrer" className="inline-flex min-w-0 items-center gap-2 font-mono text-foreground hover:underline"><span className="truncate">{link.shortUrl}</span><ExternalLink className="size-3.5 shrink-0" /></a></div>
-              </article>
-            )
-          }) : null}
+          <button type="button" className="partner-links-filter-trigger" onClick={() => setFiltersOpen(true)} aria-label={linkCopy.filtersTitle}>
+            <SlidersHorizontal aria-hidden="true" />
+          </button>
         </div>
+
+        {actionError && !renameLink && !revokeLink ? <p className="partner-links-alert" role="alert">{actionError}</p> : null}
+
+        {loadState === "loading" ? <CreatorLinksSkeleton /> : null}
+        {loadState === "error" ? <div className="partner-links-state is-error" role="alert"><p>{loadError ?? linkCopy.loadError}</p><button type="button" className="vp-button" onClick={() => { setLoadState("loading"); setLoadError(null); void load() }}>{linkCopy.retry}</button></div> : null}
+        {loadState === "ready" ? filteredLinks.length === 0 ? (
+          <div className="partner-links-state">
+            <p>{links.length === 0 ? linkCopy.empty : search.trim() ? linkCopy.searchEmpty : linkCopy.filteredEmpty}</p>
+          </div>
+        ) : (
+          <>
+            <div className="partner-links-table-wrap">
+              <table className="partner-links-table">
+                <thead><tr>
+                  <th scope="col">{linkCopy.tableLabel}</th>
+                  <th scope="col">{linkCopy.tableType}</th>
+                  <th scope="col">{linkCopy.tableStatus}</th>
+                  <th scope="col">{linkCopy.tableClicks}</th>
+                  <th scope="col">{linkCopy.tableOrders}</th>
+                  <th scope="col">{linkCopy.tableActions}</th>
+                </tr></thead>
+                <tbody>{filteredLinks.map((link) => {
+                  const status = statusText(link)
+                  return <tr key={link.id}>
+                    <td className="partner-links-label-cell">
+                      <strong title={link.label}>{link.label}</strong>
+                      <a href={link.shortUrl} target="_blank" rel="noreferrer" aria-label={linkCopy.openShortLink.replace("{label}", link.label)} title={link.targetUrl}>
+                        <span>{shortPath(link.shortUrl, link.code)}</span><ExternalLink aria-hidden="true" />
+                      </a>
+                    </td>
+                    <td><span className="partner-links-type">{linkCopy.types[link.linkType]}</span></td>
+                    <td><span className={`partner-links-status ${status.className}`}>{status.label}</span></td>
+                    <td>{link.clicks}</td>
+                    <td>{link.orders}</td>
+                    <td>{actionButtons(link)}</td>
+                  </tr>
+                })}</tbody>
+              </table>
+            </div>
+            <div className="partner-links-mobile-list">
+              {filteredLinks.map((link) => {
+                const status = statusText(link)
+                return <article className="partner-links-card" key={link.id}>
+                  <div className="partner-links-card-heading">
+                    <div className="partner-links-card-title"><h2>{link.label}</h2><span className="partner-links-card-meta">{linkCopy.types[link.linkType]} · {targetLocale(link.targetPath)}</span></div>
+                    <div className="partner-links-card-heading-actions"><span className={`partner-links-status ${status.className}`}>{status.label}</span>{actionButtons(link, true)}</div>
+                  </div>
+                  <div className="partner-links-card-short">
+                    <a href={link.shortUrl} target="_blank" rel="noreferrer" aria-label={linkCopy.openShortLink.replace("{label}", link.label)}><span>{shortPath(link.shortUrl, link.code)}</span><ExternalLink aria-hidden="true" /></a>
+                    <button type="button" className="partner-links-quick-copy" onClick={() => void copyLink(link)} disabled={!isLinkAvailable(link)} aria-label={`${copiedId === link.id ? linkCopy.copied : linkCopy.copy}: ${link.shortUrl}`}>
+                      {copiedId === link.id ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}{copiedId === link.id ? linkCopy.copied : linkCopy.copy}
+                    </button>
+                  </div>
+                  <div className="partner-links-card-footer"><span>{linkCopy.tableClicks}: {link.clicks}</span><span>{linkCopy.tableOrders}: {link.orders}</span></div>
+                  {link.expiresAt ? <div className="partner-links-card-footer"><span>{(link.isExpired ? linkCopy.expired : linkCopy.expires).replace("{date}", formatDate(link.expiresAt, locale))}</span></div> : null}
+                </article>
+              })}
+            </div>
+          </>
+        ) : null}
       </div>
 
-      <QrDialog key={qrLink?.id ?? "qr-closed"} link={qrLink} onClose={() => setQrLink(null)} />
-      <Dialog open={Boolean(renameLink)} onOpenChange={(open) => { if (!open && !renaming) setRenameLink(null) }}>
-        <DialogContent className="border-border bg-background p-0 text-foreground sm:max-w-[440px]">
-          <DialogHeader className="border-b border-border px-6 py-5 pr-14"><DialogTitle className="font-sans text-lg font-medium">Название ссылки</DialogTitle><DialogDescription className="text-sm text-muted-foreground">Это название видно только вам в кабинете.</DialogDescription></DialogHeader>
-          <form onSubmit={(event) => void saveRename(event)} className="px-6 py-5">
-            <label className="block text-sm"><span className="font-medium">Название</span><input autoFocus required maxLength={80} value={renameLabel} onChange={(event) => setRenameLabel(event.target.value)} className="mt-2 h-11 w-full border border-input bg-background px-3 outline-none focus:border-foreground" /></label>
-            <button type="submit" disabled={renaming} className="mt-5 h-11 w-full bg-primary px-5 text-sm font-medium text-primary-foreground disabled:opacity-50">{renaming ? "Сохраняем..." : "Сохранить название"}</button>
+      <Dialog open={filtersOpen} onOpenChange={setFiltersOpen}>
+        <DialogContent className="dialog-mobile-sheet partner-links-filter-dialog border-border bg-background p-0 text-foreground sm:max-w-[440px]">
+          <DialogHeader className="border-b border-border px-5 py-5 pr-14 sm:px-6">
+            <DialogTitle className="font-sans text-lg font-medium">{linkCopy.filtersTitle}</DialogTitle>
+            <DialogDescription>{linkCopy.filtersDescription}</DialogDescription>
+          </DialogHeader>
+          <div className="partner-links-filter-dialog-form">
+            <label className="partner-links-field"><span>{linkCopy.filterType}</span><select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value as "all" | LinkType)}><option value="all">{linkCopy.typeAll}</option>{Object.entries(linkCopy.types).map(([value, name]) => <option key={value} value={value}>{name}</option>)}</select></label>
+            <label className="partner-links-field"><span>{linkCopy.filterStatus}</span><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as StatusFilter)}><option value="all">{linkCopy.statusAll}</option><option value="active">{linkCopy.active}</option><option value="revoked">{linkCopy.revoked}</option><option value="expired">{linkCopy.statusExpired}</option></select></label>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={createOpen} onOpenChange={(open) => { if (!saving) { setCreateOpen(open); if (!open) resetCreateForm() } }}>
+        <DialogContent className="dialog-mobile-sheet partner-links-dialog border-border bg-background p-0 text-foreground sm:max-w-[720px]">
+          <DialogHeader className="border-b border-border px-5 py-5 pr-14 sm:px-6">
+            <DialogTitle className="font-sans text-lg font-medium">{linkCopy.newTitle}</DialogTitle>
+            <DialogDescription>{linkCopy.newDescription}</DialogDescription>
+          </DialogHeader>
+          <form onSubmit={(event) => void createLink(event)} className="partner-links-dialog-form">
+            <label className="partner-links-field">
+              <span>{linkCopy.type}</span>
+              <select value={linkType} onChange={(event) => setLinkType(event.target.value as LinkType)}>
+                {Object.entries(linkCopy.types).map(([value, name]) => <option key={value} value={value}>{name}</option>)}
+              </select>
+            </label>
+            <label className="partner-links-field">
+              <span>{linkCopy.targetUrl}</span>
+              <input required type="url" inputMode="url" autoComplete="url" value={targetUrl} onChange={(event) => { setTargetUrl(event.target.value); if (createTargetInvalid) { setCreateTargetInvalid(false); setCreateError(null) } }} placeholder={linkCopy.targetPlaceholder} aria-invalid={createTargetInvalid ? "true" : undefined} aria-describedby={createTargetInvalid ? "partner-link-create-error" : "partner-link-type-hint"} />
+              <small id="partner-link-type-hint">{linkCopy.typeHints[linkType]}</small>
+            </label>
+            <label className="partner-links-field">
+              <span>{linkCopy.linkName}</span>
+              <input maxLength={80} value={label} onChange={(event) => setLabel(event.target.value)} placeholder={linkCopy.linkNamePlaceholder} />
+              <small>{linkCopy.linkNameNote}</small>
+            </label>
+            <label className="partner-links-field">
+              <span>{linkCopy.expiresAt}</span>
+              <input type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} />
+              <small>{linkCopy.expiresAtNote}</small>
+            </label>
+            {createError ? <p className="partner-links-alert" id="partner-link-create-error" role="alert">{createError}</p> : null}
+            <button type="submit" className="vp-button partner-links-submit" disabled={saving}>
+              {saving ? linkCopy.creating : linkCopy.create}
+            </button>
           </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(createdLink)} onOpenChange={(open) => { if (!open) setCreatedLink(null) }}>
+        <DialogContent className="dialog-mobile-sheet partner-links-dialog border-border bg-background p-0 text-foreground sm:max-w-[480px]">
+          <DialogHeader className="border-b border-border px-5 py-5 pr-14 sm:px-6">
+            <DialogTitle className="font-sans text-lg font-medium">{linkCopy.createdTitle}</DialogTitle>
+            <DialogDescription>{linkCopy.createdDescription}</DialogDescription>
+          </DialogHeader>
+          {createdLink ? <div className="partner-links-created-content">
+            <p className="partner-links-result-url">{createdLink.shortUrl}</p>
+            <QrCodePanel link={createdLink} copy={linkCopy} />
+            <div className="partner-links-result-actions">
+              <button type="button" className="vp-button" onClick={() => void copyLink(createdLink)}>
+                {copiedId === createdLink.id ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
+                {copiedId === createdLink.id ? linkCopy.copied : linkCopy.copy}
+              </button>
+              <button type="button" className="vp-button partner-links-secondary-button" onClick={() => { setCreatedLink(null); openCreate() }}>{linkCopy.createAnother}</button>
+            </div>
+          </div> : null}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(qrLink)} onOpenChange={(open) => { if (!open) setQrLink(null) }}>
+        <DialogContent className="dialog-mobile-sheet partner-links-dialog border-border bg-background p-0 text-foreground sm:max-w-[440px]">
+          <DialogHeader className="border-b border-border px-5 py-5 pr-14 sm:px-6">
+            <DialogTitle className="font-sans text-lg font-medium">{linkCopy.qrTitle}</DialogTitle>
+            <DialogDescription>{linkCopy.qrDescription}</DialogDescription>
+          </DialogHeader>
+          {qrLink ? <QrCodePanel link={qrLink} copy={linkCopy} /> : null}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(renameLink)} onOpenChange={(open) => { if (!open && !renaming) setRenameLink(null) }}>
+        <DialogContent className="dialog-mobile-sheet partner-links-dialog border-border bg-background p-0 text-foreground sm:max-w-[440px]">
+          <DialogHeader className="border-b border-border px-5 py-5 pr-14 sm:px-6">
+            <DialogTitle className="font-sans text-lg font-medium">{linkCopy.renameTitle}</DialogTitle>
+            <DialogDescription>{linkCopy.renameDescription}</DialogDescription>
+          </DialogHeader>
+          <form onSubmit={(event) => void saveRename(event)} className="partner-links-dialog-form">
+            <label className="partner-links-field"><span>{linkCopy.linkName}</span><input autoFocus required maxLength={80} value={renameLabel} onChange={(event) => setRenameLabel(event.target.value)} /></label>
+            {actionError ? <p className="partner-links-alert" role="alert">{actionError}</p> : null}
+            <button type="submit" className="vp-button partner-links-submit" disabled={renaming}>{renaming ? linkCopy.saving : linkCopy.saveName}</button>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(revokeLink)} onOpenChange={(open) => { if (!open && !revoking) setRevokeLink(null) }}>
+        <DialogContent className="dialog-mobile-sheet partner-links-dialog border-border bg-background p-0 text-foreground sm:max-w-[440px]">
+          <DialogHeader className="border-b border-border px-5 py-5 pr-14 sm:px-6">
+            <DialogTitle className="font-sans text-lg font-medium">{linkCopy.revokeTitle}</DialogTitle>
+            <DialogDescription>{linkCopy.revokeDescription}</DialogDescription>
+          </DialogHeader>
+          {actionError ? <p className="partner-links-alert partner-links-dialog-inline-alert" role="alert">{actionError}</p> : null}
+          <div className="partner-links-dialog-actions">
+            <button type="button" className="vp-button partner-links-secondary-button" onClick={() => setRevokeLink(null)} disabled={revoking}>{linkCopy.cancel}</button>
+            <button type="button" className="vp-button partner-links-revoke-button" onClick={() => void confirmRevoke()} disabled={revoking}>{revoking ? linkCopy.saving : linkCopy.confirmRevoke}</button>
+          </div>
         </DialogContent>
       </Dialog>
     </section>
   )
 }
 
-function QrDialog({ link, onClose }: { link: ReferralLink | null; onClose: () => void }) {
+function SummaryCard({ icon: Icon, tone = "default", label, value }: { icon: typeof Link2; tone?: "default" | "active" | "muted"; label: string; value: number | string }) {
+  return <section className="partner-links-summary-card"><div className={`partner-links-summary-icon is-${tone}`}><Icon aria-hidden="true" /></div><span>{label}</span><strong>{value}</strong></section>
+}
+
+function QrCodePanel({ link, copy }: { link: ReferralLink; copy: LinkCopy }) {
   const [dataUrl, setDataUrl] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const [failed, setFailed] = useState(false)
 
   useEffect(() => {
-    if (!link) return
     let active = true
     void (async () => {
       try {
         const { default: QRCode } = await import("qrcode")
-        const url = await QRCode.toDataURL(link.shortUrl, { width: 280, margin: 1, errorCorrectionLevel: "M", color: { dark: "#121212", light: "#ffffff" } })
-        if (active) setDataUrl(url)
+        const result = await QRCode.toDataURL(link.shortUrl, {
+          width: 280,
+          margin: 1,
+          errorCorrectionLevel: "M",
+          color: { dark: "#111111", light: "#ffffff" },
+        })
+        if (active) setDataUrl(result)
       } catch {
-        if (active) setError("Не удалось сгенерировать QR-код.")
+        if (active) setFailed(true)
       }
     })()
     return () => { active = false }
-  }, [link])
+  }, [link.shortUrl])
 
   return (
-    <Dialog open={Boolean(link)} onOpenChange={(open) => { if (!open) onClose() }}>
-      <DialogContent className="border-border bg-background p-0 text-foreground sm:max-w-[420px]">
-        <DialogHeader className="border-b border-border px-6 py-5 pr-14"><DialogTitle className="font-sans text-lg font-medium">QR-код ссылки</DialogTitle><DialogDescription className="text-sm text-muted-foreground">Откройте или сохраните короткую ссылку для своей аудитории.</DialogDescription></DialogHeader>
-        <div className="flex flex-col items-center gap-5 px-6 py-7">
-          {dataUrl ? <Image src={dataUrl} alt={`QR-код для ${link?.label ?? "ссылки"}`} width={280} height={280} unoptimized className="size-[280px] border border-border" /> : <div className="flex size-[280px] items-center justify-center border border-border text-sm text-muted-foreground" role="status">{error ?? "Генерируем..."}</div>}
-          <p className="max-w-full truncate font-mono text-xs text-muted-foreground">{link?.shortUrl}</p>
-          {dataUrl ? <a href={dataUrl} download={`vizaje-${link?.code ?? "referral"}-qr.png`} className="inline-flex h-11 items-center gap-2 border border-border px-4 text-sm font-medium hover:bg-muted"><Download className="size-4" />Скачать PNG</a> : null}
-        </div>
-      </DialogContent>
-    </Dialog>
+    <div className="partner-links-qr-content">
+      {dataUrl ? <Image src={dataUrl} alt={copy.qrAlt.replace("{label}", link.label)} width={280} height={280} unoptimized className="partner-links-qr-image" /> : <div className="partner-links-qr-placeholder" role="status">{failed ? copy.qrError : copy.generating}</div>}
+      <p className="partner-links-qr-url" title={link.shortUrl}>{link.shortUrl}</p>
+      {dataUrl ? <a className="vp-button partner-links-download" href={dataUrl} download={`vizaje-${link.code}-qr.png`}><Download aria-hidden="true" />{copy.download}</a> : null}
+    </div>
   )
 }

@@ -7,9 +7,10 @@ type LocaleSwitcherProps = {
   locale: Locale
   className?: string
   onChange?: () => void
+  locales?: readonly Locale[]
 }
 
-export default function LocaleSwitcher({ locale, className = "", onChange }: LocaleSwitcherProps) {
+export default function LocaleSwitcher({ locale, className = "", onChange, locales = ["ru", "ro"] }: LocaleSwitcherProps) {
   const router = useRouter()
 
   function selectLocale(nextLocale: Locale) {
@@ -26,7 +27,7 @@ export default function LocaleSwitcher({ locale, className = "", onChange }: Loc
 
   return (
     <div role="group" aria-label={locale === "ro" ? "Alege limba" : "Выбрать язык"} className={className}>
-      {(["ru", "ro"] as const).map((option) => (
+      {locales.map((option) => (
         <button
           key={option}
           type="button"

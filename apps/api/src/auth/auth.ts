@@ -4,10 +4,13 @@ import {
   authAccounts,
   authSessions,
   authVerifications,
+  auditLogs,
   getDb,
   users,
 } from "@vizaje/db"
 import { getApiEnv } from "../env"
+import { logger } from "../logger"
+import { queuePasswordResetEmail } from "../modules/auth/password-reset-email"
 
 const env = getApiEnv()
 
@@ -38,6 +41,25 @@ export const auth = betterAuth({
     disableSignUp: true,
     minPasswordLength: 12,
     maxPasswordLength: 128,
+    resetPasswordTokenExpiresIn: 60 * 60,
+    revokeSessionsOnPasswordReset: true,
+    sendResetPassword: async ({ user, url }) => {
+      await queuePasswordResetEmail({ userId: user.id, email: user.email, url })
+    },
+    onPasswordReset: async ({ user }) => {
+      try {
+        await getDb().insert(auditLogs).values({
+          actorUserId: user.id,
+          action: "AUTH_PASSWORD_RESET",
+          entityType: "user",
+          entityId: user.id,
+          metadata: {},
+          createdAt: new Date(),
+        })
+      } catch (error) {
+        logger.error({ errorName: error instanceof Error ? error.name : "UnknownError" }, "password reset audit event could not be recorded")
+      }
+    },
   },
   session: {
     expiresIn: 60 * 60 * 24 * 7,
@@ -49,9 +71,9 @@ export const auth = betterAuth({
     window: 10,
     max: 100,
     customRules: {
-      "/sign-in/email": { window: 60, max: 5 },
+      "/sign-in/email": { window: 60, max: 10 },
     },
   },
   trustedOrigins: env.AUTH_TRUSTED_ORIGINS,
-  disabledPaths: ["/sign-up/email", "/request-password-reset", "/reset-password"],
+  disabledPaths: ["/sign-up/email"],
 })

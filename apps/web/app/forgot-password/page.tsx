@@ -12,7 +12,7 @@ export default async function ForgotPasswordPage() {
   const locale = normalizeLocale((await cookies()).get(localeCookieName)?.value)
   const copy = translations[locale].forgotPassword
   const current = await getCurrentAdmin()
-  if (current) redirect(current.partner?.type === "creator" && current.partner.status === "active" ? "/app/links" : "/app")
+  if (current) redirect(current.partner?.type === "creator" && current.partner.status === "active" ? "/dashboard" : "/app")
 
   return (
     <AuthPageShell locale={locale}>

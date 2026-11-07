@@ -3,6 +3,7 @@ import Link from "next/link"
 import type { ReactNode } from "react"
 import LocaleSwitcher from "@/components/landing/locale-switcher"
 import { translations, type Locale } from "@/lib/translations"
+import { AuthPageTransition } from "./auth-page-transition"
 
 const decorations = [
   { src: "/brand/login/01_dolce_gabbana_light_blue.png", className: "auth-decoration--blue", width: 741, height: 984, loading: "eager" as const },
@@ -18,7 +19,7 @@ export function AuthPageShell({ locale, children }: { locale: Locale; children: 
   const copy = translations[locale]
 
   return (
-    <div className="auth-page flex min-h-svh flex-col">
+    <AuthPageTransition className="auth-page flex min-h-svh flex-col">
       <div className="auth-decoration-layer" aria-hidden="true">
         {decorations.map((decoration) => (
           <Image
@@ -58,6 +59,6 @@ export function AuthPageShell({ locale, children }: { locale: Locale; children: 
         </Link>
         <div className="auth-content w-full max-w-[440px]">{children}</div>
       </main>
-    </div>
+    </AuthPageTransition>
   )
 }

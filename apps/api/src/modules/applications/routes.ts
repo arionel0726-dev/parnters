@@ -24,7 +24,7 @@ function requestIp(request: Request) {
 
 publicApplications.post("/", async (c) => {
   const ipAddress = requestIp(c.req.raw)
-  if (!consumeApplicationRateLimit(`ip:${ipAddress}`)) {
+  if (!(await consumeApplicationRateLimit(`ip:${ipAddress}`))) {
     return apiError(c, 429, "RATE_LIMITED", "Слишком много заявок. Попробуйте позже.")
   }
 
@@ -52,7 +52,7 @@ publicApplications.post("/", async (c) => {
 })
 
 publicApplications.post("/activate", async (c) => {
-  if (!consumeApplicationRateLimit(`activation:${requestIp(c.req.raw)}`)) {
+  if (!(await consumeApplicationRateLimit(`activation:${requestIp(c.req.raw)}`))) {
     return apiError(c, 429, "RATE_LIMITED", "Слишком много попыток. Попробуйте позже.")
   }
   let payload: unknown

@@ -3,11 +3,21 @@ import { Hono } from "hono"
 import type { ApiEnv } from "../../auth/middleware"
 import { requirePermission } from "../../auth/middleware"
 import { apiError } from "../../http/errors"
-import { getPartnerRecord, listPartners } from "./repository"
+import { requireFeature } from "../../http/feature-flags"
+import { getPartnerRecord, listPartnerAgreements, listPartners } from "./repository"
 import { createPartnerAgreement, updatePartnerStatus } from "./service"
 import { listAdminReferralLinks } from "../referral-links/routes"
+import { getPartnerFinanceSummary } from "../creator-finance/repository"
 
 export const adminPartnerRoutes = new Hono<ApiEnv>()
+
+export const adminAgreementRoutes = new Hono<ApiEnv>()
+
+adminAgreementRoutes.get("/", requirePermission("agreements:read"), async (c) => {
+  const status = c.req.query("status")
+  const validStatus = status === "draft" || status === "active" || status === "expired" || status === "cancelled" ? status : undefined
+  return c.json({ agreements: await listPartnerAgreements(validStatus) })
+})
 
 adminPartnerRoutes.get("/", requirePermission("partners:read"), async (c) => {
   const parsed = partnerListQuerySchema.safeParse({
@@ -26,6 +36,12 @@ adminPartnerRoutes.get("/:id/referral-links", requirePermission("partners:read")
   const partner = await getPartnerRecord(c.req.param("id"))
   if (!partner) return apiError(c, 404, "PARTNER_NOT_FOUND", "Партнёр не найден.")
   return c.json({ links: await listAdminReferralLinks(c.req.param("id")) })
+})
+
+adminPartnerRoutes.get("/:id/finance", requirePermission("partners:read"), requireFeature("CREATOR_FINANCE_ENABLED"), requireFeature("REFERRAL_TRACKING_ENABLED"), async (c) => {
+  const partner = await getPartnerRecord(c.req.param("id"))
+  if (!partner) return apiError(c, 404, "PARTNER_NOT_FOUND", "Партнёр не найден.")
+  return c.json({ summary: await getPartnerFinanceSummary(c.req.param("id")) })
 })
 
 adminPartnerRoutes.get("/:id", requirePermission("partners:read"), async (c) => {

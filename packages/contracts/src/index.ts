@@ -132,9 +132,15 @@ export const partnerListQuerySchema = z.object({
   search: z.string().trim().max(120).optional(),
 })
 
+export const auditListQuerySchema = z.object({
+  page: z.coerce.number().int().positive().default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(25),
+})
+
 export const referralLinkCreateSchema = z.object({
   linkType: z.enum(referralLinkTypes),
   targetUrl: z.string().trim().min(1, "Укажите ссылку на Vizaje-Nica.").max(2048, "Ссылка слишком длинная."),
+  requestedLocale: z.enum(["ru", "ro"]).optional(),
   label: z.string().trim().min(1, "Укажите название ссылки.").max(80, "Название ссылки не должно превышать 80 символов.").optional(),
   expiresAt: z.iso.datetime().nullable().optional(),
 })
@@ -166,6 +172,8 @@ export const referralLinkResponseSchema = z.object({
   isExpired: z.boolean(),
   shortUrl: z.string().url(),
   targetUrl: z.string().url(),
+  clicks: z.number().int().nonnegative(),
+  orders: z.number().int().nonnegative(),
 })
 
 export type ReferralLinkCreateInput = z.infer<typeof referralLinkCreateSchema>
@@ -249,6 +257,7 @@ export const referralOrderEventV1Schema = z.discriminatedUnion("eventType", [
   orderCancelledEventV1Schema,
 ])
 
+export type ReferralOrderEventV1 = z.infer<typeof referralOrderEventV1Schema>
 export type OrderCreatedEventV1 = z.infer<typeof orderCreatedEventV1Schema>
 export type OrderUpdatedEventV1 = z.infer<typeof orderUpdatedEventV1Schema>
 export type OrderCancelledEventV1 = z.infer<typeof orderCancelledEventV1Schema>

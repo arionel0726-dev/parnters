@@ -80,7 +80,7 @@ export function LoginForm({ locale }: { locale: Locale }) {
         return
       }
 
-      router.replace(profile.partner?.type === "creator" ? "/app/links" : "/app")
+      router.replace(profile.partner?.type === "creator" ? "/dashboard" : "/app")
       router.refresh()
     } catch {
       setError(copy.login.serviceError)
@@ -91,16 +91,8 @@ export function LoginForm({ locale }: { locale: Locale }) {
 
   return (
     <form className="auth-login-form" onSubmit={handleSubmit} noValidate>
-      <div className="auth-fields">
-        {step === "password" ? (
-          <div className="flex items-center justify-between gap-3 text-sm">
-            <span className="truncate text-[#666]">{email}</span>
-            <button type="button" className="shrink-0 text-[#1d1d1d] underline underline-offset-4" onClick={() => { setStep("email"); setPassword(""); setError(null) }} disabled={loading}>
-              {copy.login.changeEmail}
-            </button>
-          </div>
-        ) : null}
-        <div className="auth-field">
+      <div className="auth-login-flow">
+        <div className="auth-login-flow-item auth-field" data-active={step === "email"} aria-hidden={step !== "email"}>
           <label htmlFor="email" className="sr-only">{copy.login.email}</label>
           <input
             id="email"
@@ -118,14 +110,23 @@ export function LoginForm({ locale }: { locale: Locale }) {
             className="auth-input auth-login-input"
             placeholder={copy.login.emailPlaceholder}
             required
-            disabled={loading}
-            hidden={step !== "email"}
+            disabled={loading || step !== "email"}
+            tabIndex={step === "email" ? 0 : -1}
             aria-invalid={Boolean(error)}
             aria-describedby={error ? "login-error" : undefined}
           />
         </div>
 
-        {step === "password" ? <div className="auth-field auth-password-field">
+        <div className="auth-login-flow-item auth-login-email-summary" data-active={step === "password"} aria-hidden={step !== "password"}>
+          <div className="flex items-center justify-between gap-3 text-sm">
+            <span className="truncate text-[#666]">{email}</span>
+            <button type="button" className="shrink-0 text-[#1d1d1d] underline underline-offset-4" onClick={() => { setStep("email"); setPassword(""); setError(null) }} disabled={loading || step !== "password"} tabIndex={step === "password" ? 0 : -1}>
+              {copy.login.changeEmail}
+            </button>
+          </div>
+        </div>
+
+        <div className="auth-login-flow-item auth-field auth-password-field" data-active={step === "password"} aria-hidden={step !== "password"}>
           <label htmlFor="password" className="sr-only">{copy.login.password}</label>
           <input
             id="password"
@@ -140,7 +141,8 @@ export function LoginForm({ locale }: { locale: Locale }) {
             className="auth-input auth-login-input auth-password-input"
             placeholder={copy.login.passwordPlaceholder}
             required
-            disabled={loading}
+            disabled={loading || step !== "password"}
+            tabIndex={step === "password" ? 0 : -1}
             aria-invalid={Boolean(error)}
             aria-describedby={error ? "login-error" : undefined}
           />
@@ -154,10 +156,12 @@ export function LoginForm({ locale }: { locale: Locale }) {
           >
             {showPassword ? <EyeOff className="size-5" aria-hidden="true" /> : <Eye className="size-5" aria-hidden="true" />}
           </button>
-        </div> : null}
+        </div>
       </div>
 
-      {step === "password" ? <Link href="/forgot-password" className="auth-forgot-link">{copy.login.forgotPassword}</Link> : null}
+      <div className="auth-login-flow-item auth-login-forgot-wrap" data-active={step === "password"} aria-hidden={step !== "password"}>
+        <Link href="/forgot-password" className="auth-forgot-link" tabIndex={step === "password" ? 0 : -1}>{copy.login.forgotPassword}</Link>
+      </div>
 
       {error ? <p id="login-error" className="auth-message auth-message-error auth-login-error" role="alert">{error}</p> : null}
 

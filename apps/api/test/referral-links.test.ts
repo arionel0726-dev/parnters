@@ -1,9 +1,13 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { hashPassword } from "better-auth/crypto"
 import { eq, inArray } from "drizzle-orm"
-import { apiRateLimits, auditLogs, authAccounts, authSessions, getDb, partnerAccounts, partners, referralLinks, users } from "@vizaje/db"
+import { apiRateLimits, auditLogs, authAccounts, authSessions, getDb, partnerAccounts, partnerAgreements, partners, payouts, referralLinkClicks, referralLinks, referralOrders, users } from "@vizaje/db"
 import { getApiEnv } from "../src/env"
 import { app } from "../src/index"
+
+process.env.CREATOR_FINANCE_ENABLED = "true"
+process.env.PAYOUTS_ENABLED = "true"
+process.env.REFERRAL_TRACKING_ENABLED = "true"
 
 const db = getDb()
 const adminEmail = `referral-admin-${crypto.randomUUID()}@vizaje.local`
@@ -77,8 +81,8 @@ beforeAll(async () => {
   await createUser(partnerUserId, partnerEmail, partnerPassword, "analyst")
   await createUser(otherPartnerUserId, otherPartnerEmail, partnerPassword, "analyst")
   await db.insert(partners).values([
-    { id: partnerId, creatorId: "CRE-REF-000001", displayName: "Referral Creator", email: partnerEmail, phone: "+37360000001", type: "creator", status: "active", tier: "starter", createdAt: now, updatedAt: now },
-    { id: otherPartnerId, creatorId: "CRE-REF-000002", displayName: "Other Creator", email: otherPartnerEmail, phone: "+37360000002", type: "creator", status: "active", tier: "starter", createdAt: now, updatedAt: now },
+    { id: partnerId, creatorId: "CRE-000001", displayName: "Referral Creator", email: partnerEmail, phone: "+37360000001", type: "creator", status: "active", tier: "starter", createdAt: now, updatedAt: now },
+    { id: otherPartnerId, creatorId: "CRE-000002", displayName: "Other Creator", email: otherPartnerEmail, phone: "+37360000002", type: "creator", status: "active", tier: "starter", createdAt: now, updatedAt: now },
   ])
   await db.insert(partnerAccounts).values([
     { userId: partnerUserId, partnerId, createdAt: now, updatedAt: now },
@@ -93,6 +97,11 @@ afterAll(async () => {
   const userIds = [adminId, partnerUserId, otherPartnerUserId]
   const partnerIds = [partnerId, otherPartnerId]
   await db.delete(auditLogs).where(inArray(auditLogs.actorUserId, userIds))
+  await db.delete(auditLogs).where(inArray(auditLogs.entityId, partnerIds))
+  await db.delete(payouts).where(inArray(payouts.partnerId, partnerIds))
+  await db.delete(referralOrders).where(inArray(referralOrders.partnerId, partnerIds))
+  await db.delete(referralLinkClicks).where(inArray(referralLinkClicks.partnerId, partnerIds))
+  await db.delete(partnerAgreements).where(inArray(partnerAgreements.partnerId, partnerIds))
   await db.delete(referralLinks).where(inArray(referralLinks.partnerId, partnerIds))
   await db.delete(partnerAccounts).where(inArray(partnerAccounts.partnerId, partnerIds))
   await db.delete(partners).where(inArray(partners.id, partnerIds))
@@ -113,7 +122,7 @@ describe("creator dashboard and referral links", () => {
     const response = await partnerRequest("/v1/partner/dashboard")
     expect(response.status).toBe(200)
     const body = await response.json() as { profile: { creatorId: string; email: string; status: string }; links: { total: number; active: number; revoked: number; expired: number } }
-    expect(body.profile.creatorId).toBe("CRE-REF-000001")
+    expect(body.profile.creatorId).toBe("CRE-000001")
     expect(body.profile.email).toBe(partnerEmail)
     expect(body.profile.status).toBe("active")
     expect(body.links).toEqual({ total: 0, active: 0, revoked: 0, expired: 0 })
@@ -138,7 +147,7 @@ describe("creator dashboard and referral links", () => {
     expect(body.profile.displayName).toBe("Referral Creator Updated")
     expect(body.profile.email).toBe(partnerEmail)
     expect(body.profile.instagram).toBe("https://instagram.com/referral.creator")
-    expect(body.profile.creatorId).toBe("CRE-REF-000001")
+    expect(body.profile.creatorId).toBe("CRE-000001")
   })
 
   test("creates an opaque link with internal label, expiry and localized destination", async () => {
@@ -162,10 +171,120 @@ describe("creator dashboard and referral links", () => {
     expect(body.link.expiresAt).toBe(expiresAt)
   })
 
+  test("records clicks, ingests an order idempotently and exposes creator finance data", async () => {
+    expect((await request("/v1/internal/referral-orders/events", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status).toBe(401)
+    const click = await request("/v1/internal/referral-links/click", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-service-token": serviceToken, "x-referral-locale": "ro" },
+      body: JSON.stringify({ code: activeCode }),
+    })
+    expect(click.status).toBe(200)
+    expect((await click.json() as { valid: boolean }).valid).toBe(true)
+
+    const now = new Date()
+    await db.insert(partnerAgreements).values({ partnerId, createdByUserId: adminId, commissionRate: "10.00", startsAt: now.toISOString().slice(0, 10), status: "active", reason: "Referral finance test", createdAt: now, updatedAt: now })
+
+    const event = {
+      eventId: crypto.randomUUID(),
+      eventVersion: "v1",
+      eventType: "order.created",
+      occurredAt: now.toISOString(),
+      orderId: `order-${crypto.randomUUID()}`,
+      referralCode: activeCode,
+      creatorId: "CRE-000001",
+      amount: "100.00",
+      currency: "MDL",
+    }
+    const first = await request("/v1/internal/referral-orders/events", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-service-token": serviceToken },
+      body: JSON.stringify(event),
+    })
+    expect(first.status).toBe(200)
+    expect((await first.json() as { idempotent: boolean }).idempotent).toBe(false)
+
+    const repeated = await request("/v1/internal/referral-orders/events", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-service-token": serviceToken },
+      body: JSON.stringify(event),
+    })
+    expect(repeated.status).toBe(200)
+    expect((await repeated.json() as { idempotent: boolean }).idempotent).toBe(true)
+
+    const updatedEvent = { ...event, eventId: crypto.randomUUID(), eventType: "order.updated", amount: "120.00" }
+    const updated = await request("/v1/internal/referral-orders/events", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-service-token": serviceToken },
+      body: JSON.stringify(updatedEvent),
+    })
+    expect(updated.status).toBe(200)
+    expect((await updated.json() as { idempotent: boolean }).idempotent).toBe(false)
+
+    const analytics = await partnerRequest("/v1/partner/analytics")
+    expect(analytics.status).toBe(200)
+    const analyticsBody = await analytics.json() as { summary: { clicks: number; orders: number; commission: string; availableByCurrency: Array<{ currency: string; amount: string }> }; orders: Array<{ orderId: string }> }
+    expect(analyticsBody.summary.clicks).toBe(1)
+    expect(analyticsBody.summary.orders).toBe(1)
+    expect(analyticsBody.summary.commission).toBe("12.00")
+    expect(analyticsBody.summary.availableByCurrency).toEqual([{ currency: "MDL", amount: "12.00" }])
+    expect(analyticsBody.orders).toHaveLength(1)
+
+    const links = await partnerRequest("/v1/partner/referral-links")
+    const linkBody = await links.json() as { links: Array<{ id: string; clicks: number; orders: number }> }
+    expect(linkBody.links.find((link) => link.id === activeLinkId)).toMatchObject({ clicks: 1, orders: 1 })
+
+    const payout = await partnerRequest("/v1/partner/payouts", {
+      method: "POST",
+      headers: { "content-type": "application/json", "Idempotency-Key": "referral-payout-test-001" },
+      body: JSON.stringify({ amount: 10, currency: "MDL" }),
+    })
+    expect(payout.status).toBe(201)
+    const payoutBody = await payout.json() as { payout: { id: string; status: string; currency: string } }
+    expect(payoutBody.payout).toMatchObject({ status: "requested", currency: "MDL" })
+    const repeatedPayout = await partnerRequest("/v1/partner/payouts", {
+      method: "POST",
+      headers: { "content-type": "application/json", "Idempotency-Key": "referral-payout-test-001" },
+      body: JSON.stringify({ amount: 10, currency: "MDL" }),
+    })
+    expect(repeatedPayout.status).toBe(200)
+    expect((await repeatedPayout.json() as { idempotent: boolean }).idempotent).toBe(true)
+    const concurrent = await Promise.all(["referral-payout-concurrent-a", "referral-payout-concurrent-b"].map((key) => partnerRequest("/v1/partner/payouts", {
+      method: "POST",
+      headers: { "content-type": "application/json", "Idempotency-Key": key },
+      body: JSON.stringify({ amount: 2, currency: "MDL" }),
+    })))
+    expect(concurrent.map((response) => response.status).sort()).toEqual([201, 409])
+
+    expect((await request("/v1/admin/me", { headers: { cookie: partnerCookie } })).status).toBe(200)
+    expect((await request("/v1/admin/overview", { headers: { cookie: partnerCookie } })).status).toBe(403)
+    expect((await request("/v1/admin/payouts", { headers: { cookie: partnerCookie } })).status).toBe(403)
+    const adminPayouts = await request("/v1/admin/payouts", { headers: { cookie: adminCookie } })
+    expect(adminPayouts.status).toBe(200)
+    expect((await adminPayouts.json() as { payouts: Array<{ payout: { id: string } }> }).payouts.some((row) => row.payout.id === payoutBody.payout.id)).toBe(true)
+    const adminFinance = await request(`/v1/admin/partners/${partnerId}/finance`, { headers: { cookie: adminCookie } })
+    expect(adminFinance.status).toBe(200)
+    expect((await adminFinance.json() as { summary: { clicks: number; orders: number } }).summary).toMatchObject({ clicks: 1, orders: 1 })
+
+    const approved = await request(`/v1/admin/payouts/${payoutBody.payout.id}/status`, { method: "PATCH", headers: { cookie: adminCookie, "content-type": "application/json" }, body: JSON.stringify({ status: "approved" }) })
+    expect(approved.status).toBe(200)
+    const paid = await request(`/v1/admin/payouts/${payoutBody.payout.id}/status`, { method: "PATCH", headers: { cookie: adminCookie, "content-type": "application/json" }, body: JSON.stringify({ status: "paid" }) })
+    expect(paid.status).toBe(200)
+
+    const cancelled = await request("/v1/internal/referral-orders/events", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-service-token": serviceToken },
+      body: JSON.stringify({ ...updatedEvent, eventId: crypto.randomUUID(), eventType: "order.cancelled" }),
+    })
+    expect(cancelled.status).toBe(200)
+    const afterCancellation = await partnerRequest("/v1/partner/analytics")
+    const afterCancellationBody = await afterCancellation.json() as { summary: { orders: number; commission: string; availableByCurrency: Array<{ currency: string; amount: string }> } }
+    expect(afterCancellationBody.summary).toMatchObject({ orders: 0, commission: "0", availableByCurrency: [{ currency: "MDL", amount: "0.00" }] })
+  })
+
   test("returns creator link details and prevents cross-creator reads, rename and revoke", async () => {
     const detail = await partnerRequest(`/v1/partner/referral-links/${activeLinkId}`)
     expect(detail.status).toBe(200)
-    expect((await detail.json() as { link: { code: string } }).link.code).toBe(activeCode)
+    expect((await detail.json() as { link: { code: string; clicks: number; orders: number } }).link).toMatchObject({ code: activeCode, clicks: 1, orders: 0 })
 
     const otherDetail = await request(`/v1/partner/referral-links/${activeLinkId}`, { headers: { cookie: otherPartnerCookie } })
     const otherRename = await request(`/v1/partner/referral-links/${activeLinkId}`, { method: "PATCH", headers: { cookie: otherPartnerCookie, "content-type": "application/json" }, body: JSON.stringify({ label: "Not mine" }) })
@@ -176,7 +295,7 @@ describe("creator dashboard and referral links", () => {
 
     const renamed = await partnerRequest(`/v1/partner/referral-links/${activeLinkId}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ label: "Sérum de zi" }) })
     expect(renamed.status).toBe(200)
-    expect((await renamed.json() as { link: { label: string } }).link.label).toBe("Sérum de zi")
+    expect((await renamed.json() as { link: { label: string; clicks: number; orders: number } }).link).toMatchObject({ label: "Sérum de zi", clicks: 1, orders: 0 })
   })
 
   test("rejects destinations outside the path allowlist, including redirect parameters", async () => {
@@ -260,11 +379,12 @@ describe("creator dashboard and referral links", () => {
     await db.update(referralLinks).set({ expiresAt: new Date(Date.now() - 60_000) }).where(eq(referralLinks.id, expiredLinkId))
     const expiredDetail = await partnerRequest(`/v1/partner/referral-links/${expiredLinkId}`)
     expect((await expiredDetail.json() as { link: { isExpired: boolean } }).link.isExpired).toBe(true)
-    expect((await serviceValidate(expiringBody.link.code).then((response) => response.json()) as { valid: boolean }).valid).toBe(false)
+    const expiredValidation = await serviceValidate(expiringBody.link.code)
+    expect((await expiredValidation.json() as { valid: boolean }).valid).toBe(false)
 
     const revoke = await partnerRequest(`/v1/partner/referral-links/${activeLinkId}/revoke`, { method: "PATCH" })
     expect(revoke.status).toBe(200)
-    expect((await revoke.json() as { link: { status: string } }).link.status).toBe("revoked")
+    expect((await revoke.json() as { link: { status: string; clicks: number; orders: number } }).link).toMatchObject({ status: "revoked", clicks: 1, orders: 0 })
     const afterRevoke = await serviceValidate(activeCode)
     expect(afterRevoke.status).toBe(200)
     expect((await afterRevoke.json() as { valid: boolean }).valid).toBe(false)

@@ -31,7 +31,7 @@ function DialogOverlay({
     <DialogPrimitive.Backdrop
       data-slot="dialog-overlay"
       className={cn(
-        "fixed inset-0 isolate z-50 bg-black/55 duration-100 supports-backdrop-filter:backdrop-blur-xs data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0",
+        "dialog-mobile-sheet__overlay fixed inset-0 isolate z-50 bg-black/55 duration-100 supports-backdrop-filter:backdrop-blur-xs data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0",
         className
       )}
       {...props}
@@ -43,10 +43,56 @@ function DialogContent({
   className,
   children,
   showCloseButton = true,
+  style,
   ...props
 }: DialogPrimitive.Popup.Props & {
   showCloseButton?: boolean
 }) {
+  const swipeCloseRef = React.useRef<HTMLButtonElement>(null)
+  const dragStartYRef = React.useRef<number | null>(null)
+  const dragOffsetRef = React.useRef(0)
+  const [dragOffset, setDragOffset] = React.useState(0)
+
+  function updateDragOffset(nextOffset: number) {
+    dragOffsetRef.current = nextOffset
+    setDragOffset(nextOffset)
+  }
+
+  function handleHandlePointerDown(event: React.PointerEvent<HTMLDivElement>) {
+    if (event.pointerType === "mouse") return
+    dragStartYRef.current = event.clientY
+    updateDragOffset(0)
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }
+
+  function handleHandlePointerMove(event: React.PointerEvent<HTMLDivElement>) {
+    if (dragStartYRef.current === null) return
+    updateDragOffset(Math.max(0, event.clientY - dragStartYRef.current))
+  }
+
+  function finishHandleDrag(event: React.PointerEvent<HTMLDivElement>) {
+    if (dragStartYRef.current === null) return
+    const shouldClose = dragOffsetRef.current >= 88
+    dragStartYRef.current = null
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+    if (shouldClose) {
+      swipeCloseRef.current?.click()
+      return
+    }
+    updateDragOffset(0)
+  }
+
+  function cancelHandleDrag(event: React.PointerEvent<HTMLDivElement>) {
+    if (dragStartYRef.current === null) return
+    dragStartYRef.current = null
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+    updateDragOffset(0)
+  }
+
   return (
     <DialogPortal>
       <DialogOverlay />
@@ -56,9 +102,22 @@ function DialogContent({
           "dialog-mobile-sheet app-surface fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-xl bg-popover p-4 text-sm text-popover-foreground ring-1 ring-foreground/10 duration-100 outline-none sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
           className
         )}
+        data-dragging={dragOffset > 0 ? "true" : undefined}
+        style={{
+          ...style,
+          "--dialog-drag-offset": `${dragOffset}px`,
+        } as React.CSSProperties}
         {...props}
       >
-        <div className="dialog-mobile-sheet__handle mx-auto mb-[-0.5rem] h-1.5 w-10 rounded-full bg-foreground/15 sm:hidden" aria-hidden="true" />
+        <div
+          className="dialog-mobile-sheet__handle mx-auto mb-[-0.5rem] h-1.5 w-10 rounded-full bg-foreground/15 sm:hidden"
+          role="presentation"
+          onPointerDown={handleHandlePointerDown}
+          onPointerMove={handleHandlePointerMove}
+          onPointerUp={finishHandleDrag}
+          onPointerCancel={cancelHandleDrag}
+        />
+        <DialogPrimitive.Close ref={swipeCloseRef} className="sr-only" aria-hidden="true" tabIndex={-1} />
         {children}
         {showCloseButton && (
           <DialogPrimitive.Close

@@ -1,6 +1,15 @@
-# Referral link contract
+# Referral link contract (M4 baseline)
 
-This contract is the handoff boundary for a future Vizaje-Nica / CodeIgniter integration. No click attribution, cookies, orders or commissions are implemented here.
+This document describes the original M4 handoff boundary for a future Vizaje-Nica / CodeIgniter integration. Its stored-link and validation rules remain the compatibility baseline. The current repository has an additive ledger extension for first-party click counts, order events, commission calculation and payout requests; those additions are listed below and do not change the public validation response.
+
+## Current repository extension
+
+- `POST /v1/internal/referral-links/click` records a service-authenticated click after the same active-link checks as validation. It accepts an optional `x-referral-locale` header and returns the validated destination.
+- `POST /v1/internal/referral-orders/events` accepts the versioned `order.created|updated|cancelled` events from `@vizaje/contracts`. Event and order IDs are idempotent and the stored row keeps the commission snapshot.
+- `GET /v1/partner/analytics`, `GET /v1/partner/orders` and `GET /v1/partner/payouts` expose creator-scoped ledger data. `POST /v1/partner/payouts` creates a currency-specific request guarded by the available balance.
+- `GET /v1/admin/payouts`, `PATCH /v1/admin/payouts/:id/status` and `GET /v1/admin/partners/:id/finance` provide audited administrator controls.
+
+The M5.1 ticket/HMAC/Legacy claim flow remains specification-only in [docs/m5.1-referral-integration-contract-v1.md](m5.1-referral-integration-contract-v1.md); the current short URL still redirects to the validated stored destination.
 
 ## Public link
 

@@ -102,3 +102,22 @@ export async function getPartnerRecord(id: string) {
   return { partner, agreements, applications, invitations, reviews, activity }
 }
 
+export async function listPartnerAgreements(status?: "draft" | "active" | "expired" | "cancelled") {
+  return getDb()
+    .select({
+      agreement: partnerAgreements,
+      partner: {
+        id: partners.id,
+        creatorId: partners.creatorId,
+        displayName: partners.displayName,
+        email: partners.email,
+        status: partners.status,
+      },
+    })
+    .from(partnerAgreements)
+    .innerJoin(partners, eq(partnerAgreements.partnerId, partners.id))
+    .where(status ? eq(partnerAgreements.status, status) : undefined)
+    .orderBy(desc(partnerAgreements.startsAt), desc(partnerAgreements.createdAt))
+    .limit(200)
+}
+

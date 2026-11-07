@@ -1,5 +1,5 @@
-import { and, desc, eq, gt, isNull, or } from "drizzle-orm"
-import { getDb, partners, referralLinks } from "@vizaje/db"
+import { and, desc, eq, gt, isNull, or, sql } from "drizzle-orm"
+import { getDb, partners, referralLinkClicks, referralLinks, referralOrders } from "@vizaje/db"
 
 export async function listReferralLinks(partnerId: string, status?: "active" | "revoked") {
   const filters = [eq(referralLinks.partnerId, partnerId)]
@@ -49,4 +49,35 @@ export async function getActiveReferralLinkByCode(code: string) {
   const result = rows[0]
   if (!result?.creatorId) return null
   return result
+}
+
+export async function getReferralLinkByCode(code: string) {
+  const rows = await getDb()
+    .select({ link: referralLinks, creatorId: partners.creatorId, partnerId: partners.id, partnerStatus: partners.status, partnerType: partners.type })
+    .from(referralLinks)
+    .innerJoin(partners, eq(referralLinks.partnerId, partners.id))
+    .where(eq(referralLinks.code, code))
+    .limit(1)
+  return rows[0] ?? null
+}
+
+export async function getReferralLinkStats(linkIds: string[]) {
+  if (!linkIds.length) return new Map<string, { clicks: number; orders: number }>()
+  const [clickRows, orderRows] = await Promise.all([
+    getDb()
+      .select({ linkId: referralLinkClicks.referralLinkId, count: sql<number>`count(*)::int` })
+      .from(referralLinkClicks)
+      .where(or(...linkIds.map((id) => eq(referralLinkClicks.referralLinkId, id))))
+      .groupBy(referralLinkClicks.referralLinkId),
+    getDb()
+      .select({ linkId: referralOrders.referralLinkId, count: sql<number>`count(*) filter (where ${referralOrders.status} = 'confirmed')::int` })
+      .from(referralOrders)
+      .where(or(...linkIds.map((id) => eq(referralOrders.referralLinkId, id))))
+      .groupBy(referralOrders.referralLinkId),
+  ])
+  const stats = new Map<string, { clicks: number; orders: number }>()
+  for (const id of linkIds) stats.set(id, { clicks: 0, orders: 0 })
+  for (const row of clickRows) stats.get(row.linkId)!.clicks = Number(row.count)
+  for (const row of orderRows) stats.get(row.linkId)!.orders = Number(row.count)
+  return stats
 }

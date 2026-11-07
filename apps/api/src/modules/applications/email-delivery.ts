@@ -4,7 +4,7 @@ import { getApiEnv } from "../../env"
 import { logger } from "../../logger"
 
 export type ApplicationEmailEvent = "submitted" | "in_review" | "approved" | "rejected"
-type EmailContent = {
+export type EmailContent = {
   subject: string
   html: string
   text: string
@@ -74,7 +74,7 @@ export async function encryptEmailContent(content: EmailContent) {
   return base64Encode(result)
 }
 
-async function decryptEmailContent(payload: string): Promise<EmailContent> {
+export async function decryptEmailContent(payload: string): Promise<EmailContent> {
   const decoded = base64Decode(payload)
   const nonce = decoded.slice(0, 12)
   const encrypted = decoded.slice(12)
@@ -96,11 +96,11 @@ function cleanCandidateReason(reason: string) {
   return reason.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "").trim().slice(0, 1000)
 }
 
-function emailFrame(title: string, body: string, button?: { label: string; href: string }) {
+function emailFrame(body: string, logoUrl: string, button?: { label: string; href: string }) {
   const action = button
     ? `<p style="margin:28px 0"><a href="${escapeHtml(button.href)}" style="display:inline-block;background:#111;color:#fff;text-decoration:none;border-radius:999px;padding:14px 24px">${escapeHtml(button.label)}</a></p>`
     : ""
-  const html = `<!doctype html><html><body style="margin:0;background:#fff;color:#1d1d1d;font:16px/1.6 Inter,Arial,sans-serif"><main style="max-width:560px;margin:0 auto;padding:40px 24px"><p style="margin:0 0 28px;font-size:14px;letter-spacing:.12em">VIZAJE-NICA PARTNERS</p><h1 style="margin:0 0 18px;font-size:26px;font-weight:500;line-height:1.2">${escapeHtml(title)}</h1>${body}${action}<p style="margin-top:36px;color:#777;font-size:13px">Vizaje-Nica Partners</p></main></body></html>`
+  const html = `<!doctype html><html><body style="margin:0;background:#fff;color:#1d1d1d;font:16px/1.6 Inter,Arial,sans-serif"><main style="max-width:560px;margin:0 auto;padding:40px 24px"><div style="margin:0 0 28px;text-align:center"><img src="${escapeHtml(logoUrl)}" width="36" height="27" alt="Vizaje-Nica" style="display:block;width:36px;height:27px;margin:0 auto;border:0"></div>${body}${action}</main></body></html>`
   return html
 }
 
@@ -119,41 +119,49 @@ export function createApplicationEmailContent({
 }): EmailContent {
   const env = getApiEnv()
   const firstName = escapeHtml(fullName.trim().split(/\s+/)[0] || fullName)
-  const isRomanian = locale === "ro"
-  const messages = isRomanian
-    ? {
-        submitted: { subject: "Am primit candidatura ta — Vizaje-Nica Partners", title: "Candidatura a fost primită", body: `<p>Salut, ${firstName}!</p><p>Îți mulțumim pentru interesul față de programul de parteneriat Vizaje-Nica. Am primit candidatura și o vom analiza.</p>` },
-        in_review: { subject: "Candidatura ta este în curs de analiză — Vizaje-Nica Partners", title: "Candidatura este în curs de analiză", body: `<p>Salut, ${firstName}!</p><p>Candidatura ta pentru programul de parteneriat Vizaje-Nica a intrat în etapa de analiză. Îți vom comunica decizia prin email.</p>` },
-        approved: { subject: "Candidatura ta a fost aprobată — Vizaje-Nica Partners", title: "Candidatura a fost aprobată", body: `<p>Salut, ${firstName}!</p><p>Felicitări! Candidatura ta a fost aprobată. Creează o parolă pentru a activa contul de creator. Linkul este valabil 7 zile și poate fi folosit o singură dată.</p>` },
-        rejected: { subject: "Actualizare privind candidatura ta — Vizaje-Nica Partners", title: "Actualizare privind candidatura", body: `<p>Salut, ${firstName}!</p><p>Îți mulțumim pentru interesul față de Vizaje-Nica. De această dată nu putem accepta candidatura.</p><p><strong>Mesaj din partea echipei:</strong><br>${escapeHtml(cleanCandidateReason(rejectionReason ?? "" )).replace(/\n/g, "<br>")}</p>` },
-      }
-    : {
-        submitted: { subject: "Мы получили вашу заявку — Vizaje-Nica Partners", title: "Заявка получена", body: `<p>Здравствуйте, ${firstName}!</p><p>Спасибо за интерес к партнёрской программе Vizaje-Nica. Мы получили вашу заявку и рассмотрим её.</p>` },
-        in_review: { subject: "Ваша заявка на рассмотрении — Vizaje-Nica Partners", title: "Заявка на рассмотрении", body: `<p>Здравствуйте, ${firstName}!</p><p>Ваша заявка на участие в партнёрской программе Vizaje-Nica перешла на этап рассмотрения. Мы сообщим вам о решении по email.</p>` },
-        approved: { subject: "Ваша заявка одобрена — Vizaje-Nica Partners", title: "Заявка одобрена", body: `<p>Здравствуйте, ${firstName}!</p><p>Поздравляем! Ваша заявка одобрена. Создайте пароль, чтобы активировать аккаунт креатора. Ссылка действует 7 дней и используется один раз.</p>` },
-        rejected: { subject: "Информация по вашей заявке — Vizaje-Nica Partners", title: "Информация по заявке", body: `<p>Здравствуйте, ${firstName}!</p><p>Спасибо за интерес к Vizaje-Nica. К сожалению, сейчас мы не можем принять вашу заявку.</p><p><strong>Сообщение команды:</strong><br>${escapeHtml(cleanCandidateReason(rejectionReason ?? "")).replace(/\n/g, "<br>")}</p>` },
-      }
-  const message = messages[event]
+  const rejectionText = escapeHtml(cleanCandidateReason(rejectionReason ?? "")).replace(/\n/g, "<br>")
+  const localizedMessages = {
+    ru: {
+      submitted: { subject: "Мы получили вашу заявку — Vizaje-Nica Partners", title: "Заявка получена", greeting: `Здравствуйте, ${firstName}!`, copy: "Спасибо за интерес к партнёрской программе Vizaje-Nica. Мы получили вашу заявку и рассмотрим её." },
+      in_review: { subject: "Ваша заявка на рассмотрении — Vizaje-Nica Partners", title: "Заявка на рассмотрении", greeting: `Здравствуйте, ${firstName}!`, copy: "Ваша заявка на участие в партнёрской программе Vizaje-Nica перешла на этап рассмотрения. Мы сообщим вам о решении по email." },
+      approved: { subject: "Ваша заявка одобрена — Vizaje-Nica Partners", title: "Заявка одобрена", greeting: `Здравствуйте, ${firstName}!`, copy: "Поздравляем! Ваша заявка одобрена. Создайте пароль, чтобы активировать аккаунт креатора. Ссылка действует 7 дней и используется один раз." },
+      rejected: { subject: "Информация по вашей заявке — Vizaje-Nica Partners", title: "Информация по заявке", greeting: `Здравствуйте, ${firstName}!`, copy: "Спасибо за интерес к Vizaje-Nica. К сожалению, сейчас мы не можем принять вашу заявку.", reasonLabel: "Сообщение команды:" },
+    },
+    ro: {
+      submitted: { subject: "Am primit candidatura ta — Vizaje-Nica Partners", title: "Candidatura a fost primită", greeting: `Salut, ${firstName}!`, copy: "Îți mulțumim pentru interesul față de programul de parteneriat Vizaje-Nica. Am primit candidatura și o vom analiza." },
+      in_review: { subject: "Candidatura ta este în curs de analiză — Vizaje-Nica Partners", title: "Candidatura este în curs de analiză", greeting: `Salut, ${firstName}!`, copy: "Candidatura ta pentru programul de parteneriat Vizaje-Nica a intrat în etapa de analiză. Îți vom comunica decizia prin email." },
+      approved: { subject: "Candidatura ta a fost aprobată — Vizaje-Nica Partners", title: "Candidatura a fost aprobată", greeting: `Salut, ${firstName}!`, copy: "Felicitări! Candidatura ta a fost aprobată. Creează o parolă pentru a activa contul de creator. Linkul este valabil 7 zile și poate fi folosit o singură dată." },
+      rejected: { subject: "Actualizare privind candidatura ta — Vizaje-Nica Partners", title: "Actualizare privind candidatura", greeting: `Salut, ${firstName}!`, copy: "Îți mulțumim pentru interesul față de Vizaje-Nica. De această dată nu putem accepta candidatura.", reasonLabel: "Mesaj din partea echipei:" },
+    },
+  } satisfies Record<"ru" | "ro", Record<ApplicationEmailEvent, { subject: string; title: string; greeting: string; copy: string; reasonLabel?: string }>>
+  const primaryLocale = locale
+  const secondaryLocale = locale === "ru" ? "ro" : "ru"
+  const orderedLocales = [primaryLocale, secondaryLocale] as const
+  const messages = orderedLocales.map((language, index) => {
+    const message = localizedMessages[language][event]
+    const heading = index === 0 ? "h1" : "h2"
+    const headingStyle = index === 0
+      ? "margin:0 0 18px;font-size:26px;font-weight:500;line-height:1.2"
+      : "margin:0 0 18px;font-size:20px;font-weight:500;line-height:1.3"
+    const languageLabel = language === "ru" ? "Русский" : "Română"
+    const divider = index === 0 ? "" : `<hr style="margin:28px 0;border:0;border-top:1px solid #e6e6e6">`
+    return {
+      subject: localizedMessages[locale][event].subject,
+      html: `${divider}<section lang="${language}"><p style="margin:0 0 8px;color:#777;font-size:12px;letter-spacing:.04em">${languageLabel}</p><${heading} style="${headingStyle}">${message.title}</${heading}><p>${message.greeting}</p><p>${message.copy}</p></section>`,
+      text: `${languageLabel}\n${message.title}\n\n${message.greeting}\n${message.copy}`,
+    }
+  })
+  const message = messages[0]!
+  const rejectionNotice = event === "rejected" && rejectionReason
+    ? `<p style="margin-top:24px"><strong>Комментарий команды / Mesajul echipei (text original):</strong><br>${rejectionText}</p>`
+    : ""
   const button = event === "approved" && activationInvitationId
-    ? { label: isRomanian ? "Activează contul" : "Активировать аккаунт", href: "{{ACTIVATION_URL}}" }
+    ? { label: "Активировать аккаунт / Activează contul", href: "{{ACTIVATION_URL}}" }
     : undefined
-  const textByEvent: Record<ApplicationEmailEvent, string> = isRomanian
-    ? {
-        submitted: `Salut, ${fullName}! Am primit candidatura ta la programul de parteneriat Vizaje-Nica și o vom analiza.`,
-        in_review: `Salut, ${fullName}! Candidatura ta Vizaje-Nica este în curs de analiză. Îți vom comunica decizia prin email.`,
-        approved: `Salut, ${fullName}! Candidatura ta a fost aprobată. Creează o parolă pentru activarea contului. Linkul este valabil 7 zile și poate fi folosit o singură dată. {{ACTIVATION_URL}}`,
-        rejected: `Salut, ${fullName}! De această dată nu putem accepta candidatura. Mesaj din partea echipei: ${cleanCandidateReason(rejectionReason ?? "")}`,
-      }
-    : {
-        submitted: `Здравствуйте, ${fullName}! Мы получили вашу заявку в партнёрскую программу Vizaje-Nica и рассмотрим её.`,
-        in_review: `Здравствуйте, ${fullName}! Ваша заявка Vizaje-Nica находится на рассмотрении. Мы сообщим решение по email.`,
-        approved: `Здравствуйте, ${fullName}! Ваша заявка одобрена. Создайте пароль для активации аккаунта. Ссылка действует 7 дней и используется один раз. {{ACTIVATION_URL}}`,
-        rejected: `Здравствуйте, ${fullName}! Сейчас мы не можем принять вашу заявку. Сообщение команды: ${cleanCandidateReason(rejectionReason ?? "")}`,
-      }
   return {
     subject: message.subject,
-    html: emailFrame(message.title, message.body, button),
-    text: textByEvent[event],
+    html: emailFrame(`${messages.map(({ html }) => html).join("")}${rejectionNotice}`, new URL("/brand/mini-logo.svg", env.WEB_APP_URL).toString(), button),
+    text: `${messages.map(({ text }) => text).join("\n\n────────────────────\n\n")}${event === "rejected" && rejectionReason ? `\n\nКомментарий команды / Mesajul echipei (text original): ${cleanCandidateReason(rejectionReason)}` : ""}${button ? `\n\nАктивировать аккаунт / Activează contul: {{ACTIVATION_URL}}` : ""}`,
     sender: env.EMAIL_FROM,
     webAppUrl: env.WEB_APP_URL,
     ...(activationInvitationId ? { activationInvitationId } : {}),

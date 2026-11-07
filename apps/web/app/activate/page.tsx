@@ -17,7 +17,7 @@ export default async function ActivatePage({ searchParams }: ActivatePageProps) 
   const locale = normalizeLocale((await cookies()).get(localeCookieName)?.value)
   const copy = translations[locale].activate
   const current = await getCurrentAdmin()
-  if (current) redirect(current.partner?.type === "creator" && current.partner.status === "active" ? "/app/links" : "/app")
+  if (current) redirect(current.partner?.type === "creator" && current.partner.status === "active" ? "/dashboard" : "/app")
 
   const { token } = await searchParams
   const hasToken = typeof token === "string" && token.trim().length > 0

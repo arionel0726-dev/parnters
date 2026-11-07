@@ -3,18 +3,20 @@
 import Link from "next/link"
 import Image from "next/image"
 import { usePathname, useRouter } from "next/navigation"
-import { useState } from "react"
+import { useState, useSyncExternalStore } from "react"
 import {
-  Bell,
   ClipboardCheck,
   FileText,
   Link2,
   LayoutDashboard,
   ListChecks,
+  Mail,
   Menu,
-  Search,
-  Settings2,
+  PanelLeftClose,
+  PanelLeftOpen,
+  ReceiptText,
   UsersRound,
+  WalletCards,
   X,
 } from "lucide-react"
 import type { ReactNode } from "react"
@@ -25,33 +27,47 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { AppearanceSettings } from "@/features/appearance/appearance-settings"
 import { cn } from "@/lib/utils"
-import { SettingsDrawerProvider } from "@/components/layout/settings-drawer-context"
+import { useDashboardLocale } from "@/components/dashboard/dashboard-locale-provider"
 import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet"
+  avatarColorOptions,
+  getAvatarColorSnapshot,
+  getServerAvatarColorSnapshot,
+  setAvatarColor,
+  subscribeToAvatarColor,
+  type AvatarColorId,
+} from "@/components/creator-dashboard/avatar-preferences"
+import LocaleSwitcher from "@/components/landing/locale-switcher"
+import { NotificationBell } from "@/components/notifications/notification-bell"
 
 const primaryNavigation = [
-  { label: "Overview", href: "/app", icon: LayoutDashboard },
-  { label: "Partners", href: "/app/partners", icon: UsersRound },
-  { label: "Applications", href: "/app/applications", icon: ClipboardCheck },
-  { label: "Agreements", href: "/app/agreements", icon: FileText, disabled: true },
-  { label: "Audit log", href: "/app/audit-log", icon: ListChecks, disabled: true },
+  { label: "Обзор", href: "/app", icon: LayoutDashboard },
+  { label: "Партнёры", href: "/app/partners", icon: UsersRound },
+  { label: "Заявки", href: "/app/applications", icon: ClipboardCheck, roles: ["super_admin", "program_manager", "support"] },
+  { label: "Соглашения", href: "/app/agreements", icon: FileText, disabled: false },
+  { label: "Журнал аудита", href: "/app/audit-log", icon: ListChecks, disabled: false },
+  { label: "Выплаты", href: "/app/payouts", icon: WalletCards, disabled: false, roles: ["super_admin", "finance"] },
+  { label: "Email", href: "/app/email", icon: Mail, disabled: false, roles: ["super_admin", "program_manager", "support"] },
 ]
 
-const partnerNavigation = [{ label: "Мои ссылки", href: "/app/links", icon: Link2, disabled: false }]
+const partnerNavigation = [
+  { label: "Обзор", href: "/dashboard", icon: LayoutDashboard, disabled: false },
+  { label: "Мои ссылки", href: "/app/links", icon: Link2, disabled: false },
+  { label: "Заказы", href: "/dashboard/orders", icon: ReceiptText, disabled: false },
+  { label: "Выплаты", href: "/dashboard/payouts", icon: WalletCards, disabled: false },
+]
 
-function Navigation({ mobile, onNavigate, partnerMode }: { mobile: boolean; onNavigate?: () => void; partnerMode: boolean }) {
+function Navigation({ mobile, expanded, onNavigate, partnerMode, adminRole }: { mobile: boolean; expanded: boolean; onNavigate?: () => void; partnerMode: boolean; adminRole: string }) {
   const pathname = usePathname()
-  const navigation = partnerMode ? partnerNavigation : primaryNavigation
+  const navigation = adminRole === "creator"
+    ? partnerNavigation
+    : [
+        ...primaryNavigation.filter((item) => !item.roles || item.roles.includes(adminRole)),
+        ...(partnerMode ? partnerNavigation : []),
+      ]
 
   return (
-    <nav className={cn("space-y-2", !mobile && "flex flex-col items-center")} aria-label="Primary navigation">
+    <nav className={cn("space-y-2", !mobile && (expanded ? "flex flex-col" : "flex flex-col items-center"))} aria-label="Основная навигация">
       {navigation.map(({ label, href, icon: Icon, disabled }) => {
         const active = !disabled && (href === "/app" ? pathname === href : pathname.startsWith(href))
 
@@ -61,14 +77,14 @@ function Navigation({ mobile, onNavigate, partnerMode }: { mobile: boolean; onNa
               key={label}
               className={cn(
                 "group flex items-center rounded-none text-sm text-smoke/55",
-                mobile ? "h-11 gap-3 px-3" : "size-12 justify-center",
+                mobile ? "h-11 gap-3 px-3" : expanded ? "h-11 w-full gap-3 px-3" : "size-12 justify-center",
               )}
               aria-disabled="true"
-              title={`${label} is coming soon`}
+              title={`${label} — скоро`}
             >
               <Icon className="size-[19px]" strokeWidth={1.7} aria-hidden="true" />
-              {mobile ? <span>{label}</span> : <span className="sr-only">{label}</span>}
-              {mobile ? <span className="ml-auto text-[10px] uppercase tracking-[0.08em]">Soon</span> : null}
+              {mobile || expanded ? <span>{label}</span> : <span className="sr-only">{label}</span>}
+              {mobile ? <span className="ml-auto text-[10px] uppercase tracking-[0.08em]">Скоро</span> : null}
             </div>
           )
         }
@@ -80,14 +96,14 @@ function Navigation({ mobile, onNavigate, partnerMode }: { mobile: boolean; onNa
             onClick={onNavigate}
             className={cn(
               "group flex items-center rounded-none text-sm transition-colors",
-              mobile ? "h-11 gap-3 px-3" : "size-12 justify-center",
+              mobile ? "h-11 gap-3 px-3" : expanded ? "h-11 w-full gap-3 px-3" : "size-12 justify-center",
               active ? "bg-[#f0f0ee] font-medium text-ink" : "text-smoke hover:bg-[#f6f6f4] hover:text-ink",
             )}
             aria-current={active ? "page" : undefined}
-            title={!mobile ? label : undefined}
+            title={!mobile && !expanded ? label : undefined}
           >
             <Icon className="size-[19px]" strokeWidth={1.7} aria-hidden="true" />
-            {mobile ? <span>{label}</span> : <span className="sr-only">{label}</span>}
+            {mobile || expanded ? <span>{label}</span> : <span className="sr-only">{label}</span>}
           </Link>
         )
       })}
@@ -95,18 +111,21 @@ function Navigation({ mobile, onNavigate, partnerMode }: { mobile: boolean; onNa
   )
 }
 
-function Sidebar({ mobile = false, onClose, onSettings, partnerMode }: { mobile?: boolean; onClose?: () => void; onSettings: () => void; partnerMode: boolean }) {
+function Sidebar({ mobile = false, expanded = false, onClose, onToggle, partnerMode, adminRole }: { mobile?: boolean; expanded?: boolean; onClose?: () => void; onToggle?: () => void; partnerMode: boolean; adminRole: string }) {
+  const { locale, mode } = useDashboardLocale()
+
   return (
     <aside
       className={cn(
         "flex h-full shrink-0 flex-col border-r border-border bg-white",
-        mobile ? "w-full" : "w-[84px]",
+        mobile ? "w-full" : expanded ? "w-[240px]" : "w-[84px]",
+        !mobile && "transition-[width] duration-200 ease-out",
       )}
     >
-      <div className={cn("flex h-16 items-center border-b border-border", mobile ? "justify-between px-5" : "justify-center")}>
+      <div className={cn("flex h-16 items-center border-b border-border", mobile ? "justify-between px-5" : expanded ? "justify-start px-4" : "justify-center")}>
         <Link
           href="/"
-          className={cn("flex items-center text-ink", mobile ? "" : "size-12 justify-center")}
+          className={cn("flex items-center text-ink", mobile ? "" : expanded ? "gap-3" : "size-12 justify-center")}
           onClick={onClose}
           aria-label="Vizaje Partners"
           title="Vizaje Partners"
@@ -114,36 +133,39 @@ function Sidebar({ mobile = false, onClose, onSettings, partnerMode }: { mobile?
           <Image src="/brand/mini-logo.svg" alt="" aria-hidden="true" width={36} height={27} className="h-6 w-8 object-contain lg:h-[27px] lg:w-9" />
         </Link>
         {mobile ? (
-          <button type="button" className="rounded-none p-2 text-smoke hover:bg-[#f6f6f4]" onClick={onClose} aria-label="Close navigation">
+          <button type="button" className="rounded-none p-2 text-smoke hover:bg-[#f6f6f4]" onClick={onClose} aria-label="Закрыть навигацию">
             <X className="size-5" aria-hidden="true" />
           </button>
         ) : null}
       </div>
 
-      <div className={cn("flex flex-1", mobile ? "flex-col px-4 py-5" : "flex-col items-center py-6")}>
-        <Navigation mobile={mobile} onNavigate={onClose} partnerMode={partnerMode} />
+      <div className={cn("flex flex-1", mobile ? "flex-col px-4 py-5" : expanded ? "flex-col px-3 py-6" : "flex-col items-center py-6")}>
+        <Navigation mobile={mobile} expanded={expanded} onNavigate={onClose} partnerMode={partnerMode} adminRole={adminRole} />
 
-        <div className={cn("mt-auto", mobile ? "space-y-4" : "flex flex-col items-center gap-3")}>
-          <button
-            type="button"
-            className={cn(
-              "flex items-center rounded-none text-sm text-smoke transition-colors hover:bg-[#f6f6f4] hover:text-ink",
-              mobile ? "h-11 w-full gap-3 px-3" : "size-12 justify-center",
-            )}
-            onClick={onSettings}
-            title="Settings"
-            aria-label="Open settings"
-          >
-            <Settings2 className="size-[19px]" strokeWidth={1.7} aria-hidden="true" />
-            {mobile ? <span>Settings</span> : <span className="sr-only">Settings</span>}
-          </button>
+        <div className={cn("mt-auto", mobile ? "space-y-4" : expanded ? "flex flex-col gap-3" : "flex flex-col items-center gap-3")}>
+          {!mobile && onToggle ? (
+            <button
+              type="button"
+              className={cn(
+                "flex items-center rounded-none text-sm text-smoke transition-colors hover:bg-[#f6f6f4] hover:text-ink",
+                expanded ? "h-11 w-full gap-3 px-3" : "size-12 justify-center",
+              )}
+              onClick={onToggle}
+              title={expanded ? "Скрыть боковую панель" : "Развернуть боковую панель"}
+              aria-label={expanded ? "Скрыть боковую панель" : "Развернуть боковую панель"}
+            >
+              {expanded ? <PanelLeftClose className="size-[19px]" strokeWidth={1.7} aria-hidden="true" /> : <PanelLeftOpen className="size-[19px]" strokeWidth={1.7} aria-hidden="true" />}
+              {expanded ? <span>Скрыть</span> : <span className="sr-only">Развернуть</span>}
+            </button>
+          ) : null}
+          {mobile && mode === "creator" ? <LocaleSwitcher locale={locale} className="flex h-11 items-center gap-3 px-3 text-sm font-medium" /> : null}
 
           <div className={cn("flex items-center", mobile ? "gap-3 px-3" : "justify-center")}>
             <div className="flex size-9 items-center justify-center rounded-sm border border-border bg-[#f7f7f5] text-xs font-medium text-ink">VP</div>
             {mobile ? (
               <div className="min-w-0">
-                <div className="truncate text-sm font-medium">Vizaje team</div>
-                <div className="truncate text-xs text-smoke">Foundation workspace</div>
+                <div className="truncate text-sm font-medium">Команда Vizaje</div>
+                <div className="truncate text-xs text-smoke">Рабочее пространство</div>
               </div>
             ) : null}
           </div>
@@ -153,15 +175,29 @@ function Sidebar({ mobile = false, onClose, onSettings, partnerMode }: { mobile?
   )
 }
 
-export function AppShell({ children, partnerMode = false }: { children: ReactNode; partnerMode?: boolean }) {
+type PartnerProfile = {
+  displayName: string | null
+  email: string
+  creatorId: string | null
+  status: "active" | "suspended" | "banned"
+}
+
+function emailInitial(email: string) {
+  return email.trim().slice(0, 1).toLocaleUpperCase("ru-RU") || "V"
+}
+
+export function AppShell({ children, partnerMode = false, partner = null, adminRole = "super_admin" }: { children: ReactNode; partnerMode?: boolean; partner?: PartnerProfile | null; adminRole?: string }) {
   const router = useRouter()
+  const { locale, mode } = useDashboardLocale()
   const [mobileOpen, setMobileOpen] = useState(false)
-  const [settingsOpen, setSettingsOpen] = useState(false)
-  const [notificationsOpen, setNotificationsOpen] = useState(false)
+  const [sidebarExpanded, setSidebarExpanded] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
-  const [searchOpen, setSearchOpen] = useState(false)
-  const [searchQuery, setSearchQuery] = useState("")
   const [logoutPending, setLogoutPending] = useState(false)
+  const avatarColorId = useSyncExternalStore(subscribeToAvatarColor, getAvatarColorSnapshot, getServerAvatarColorSnapshot)
+  const avatarColor = avatarColorOptions.find((option) => option.id === avatarColorId) ?? avatarColorOptions[0]
+  const partnerName = partner?.displayName || partner?.email || "Команда Vizaje"
+  const partnerInitial = partner ? emailInitial(partner.email) : "V"
+  const partnerAvatarStyle = { backgroundColor: avatarColor.color, color: avatarColor.foreground }
 
   async function handleLogout() {
     setLogoutPending(true)
@@ -176,17 +212,22 @@ export function AppShell({ children, partnerMode = false }: { children: ReactNod
   return (
     <div className="app-surface flex min-h-screen bg-white text-ink">
       <div className="hidden lg:block">
-        <Sidebar onSettings={() => setSettingsOpen(true)} partnerMode={partnerMode} />
+        <Sidebar expanded={sidebarExpanded} onToggle={() => setSidebarExpanded((current) => !current)} partnerMode={partnerMode} adminRole={adminRole} />
       </div>
 
-      {mobileOpen ? (
-        <div className="fixed inset-0 z-50 flex lg:hidden">
-          <button type="button" className="absolute inset-0 bg-black/10" onClick={() => setMobileOpen(false)} aria-label="Close navigation overlay" />
-          <div className="relative z-10 h-full w-full">
-            <Sidebar mobile onClose={() => setMobileOpen(false)} onSettings={() => setSettingsOpen(true)} partnerMode={partnerMode} />
-          </div>
+      <div
+        className="app-mobile-navigation fixed inset-0 z-50 flex lg:hidden"
+        data-open={mobileOpen ? "true" : "false"}
+        role="dialog"
+        aria-modal="true"
+        aria-hidden={!mobileOpen}
+        aria-label="Основная навигация"
+      >
+        <button type="button" className="app-mobile-navigation-overlay absolute inset-0" onClick={() => setMobileOpen(false)} aria-label="Закрыть затемнение навигации" />
+        <div className="app-mobile-navigation-panel relative z-10 h-full w-full">
+          <Sidebar mobile onClose={() => setMobileOpen(false)} partnerMode={partnerMode} adminRole={adminRole} />
         </div>
-      ) : null}
+      </div>
 
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="flex h-16 shrink-0 items-center justify-between gap-4 border-b border-border bg-white px-4 sm:px-8">
@@ -195,81 +236,77 @@ export function AppShell({ children, partnerMode = false }: { children: ReactNod
               type="button"
               className="rounded-none p-2 text-smoke hover:bg-[#f6f6f4] hover:text-ink lg:hidden"
               onClick={() => setMobileOpen(true)}
-              aria-label="Open navigation"
+              aria-label="Открыть навигацию"
             >
               <Menu className="size-5" aria-hidden="true" />
-            </button>
-            <button
-              type="button"
-              className="relative flex h-11 w-full max-w-[520px] items-center gap-3 rounded-none border border-transparent px-3 text-left text-sm text-smoke hover:border-border hover:bg-[#f6f6f4]"
-              onClick={() => setSearchOpen(true)}
-              aria-label="Open search dialog"
-            >
-              <Search className="pointer-events-none absolute left-3 size-[18px] text-smoke" strokeWidth={1.8} aria-hidden="true" />
-              <span className="pl-7">Find anything...</span>
-              <kbd className="ml-auto hidden border border-border px-1.5 py-0.5 text-[10px] tracking-normal text-smoke sm:inline">⌘ K</kbd>
             </button>
           </div>
 
           <div className="flex items-center gap-3">
-            <button
-              type="button"
-              className="relative rounded-full border border-border p-2.5 text-ink hover:bg-[#f6f6f4]"
-              onClick={() => setNotificationsOpen(true)}
-              aria-label="Notifications"
-            >
-              <Bell className="size-[18px]" strokeWidth={1.7} aria-hidden="true" />
-              <span className="absolute right-1.5 top-1.5 size-1.5 rounded-full bg-[#f5c542]" aria-hidden="true" />
-            </button>
+            <NotificationBell href={partnerMode ? "/app/notifications" : "/app/notifications"} />
             <div className="hidden h-7 w-px bg-border sm:block" aria-hidden="true" />
             <button
               type="button"
-              className="flex size-10 items-center justify-center rounded-full bg-[#252a24] text-xs font-medium text-white"
+              className="flex size-11 shrink-0 aspect-square items-center justify-center rounded-full text-xs font-medium"
+              style={partnerMode && partner ? partnerAvatarStyle : undefined}
+              data-avatar-color={partnerMode && partner ? avatarColorId : undefined}
               onClick={() => setProfileOpen(true)}
-              aria-label="Vizaje team profile"
+              aria-label={partnerMode && partner ? `Профиль ${partnerName}` : "Профиль команды Vizaje"}
             >
-              V
+              {partnerMode && partner ? partnerInitial : "V"}
             </button>
           </div>
         </header>
 
-        <SettingsDrawerProvider onOpen={() => setSettingsOpen(true)}>
-          <main className="min-w-0 flex-1">{children}</main>
-        </SettingsDrawerProvider>
+        <main className="min-w-0 flex-1">{children}</main>
       </div>
-
-      <Sheet open={settingsOpen} onOpenChange={setSettingsOpen}>
-        <SheetContent side="right" className="!w-full gap-0 border-l border-border bg-white p-0 text-ink sm:!w-[40vw] sm:!max-w-none" showCloseButton>
-          <SheetHeader className="border-b border-border px-6 py-5 pr-16">
-            <SheetTitle className="font-sans text-lg font-medium tracking-[-0.01em] text-ink">Settings</SheetTitle>
-            <SheetDescription className="text-sm text-smoke">Workspace preferences</SheetDescription>
-          </SheetHeader>
-          <AppearanceSettings drawer />
-        </SheetContent>
-      </Sheet>
-
-      <Dialog open={notificationsOpen} onOpenChange={setNotificationsOpen}>
-        <DialogContent className="rounded-none border-border bg-white p-6 text-ink sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle className="font-sans text-lg font-medium tracking-[-0.01em]">Notifications</DialogTitle>
-            <DialogDescription className="text-sm text-smoke">You&apos;re all caught up.</DialogDescription>
-          </DialogHeader>
-        </DialogContent>
-      </Dialog>
 
       <Dialog open={profileOpen} onOpenChange={setProfileOpen}>
         <DialogContent className="rounded-none border-border bg-white p-6 text-ink sm:max-w-md">
           <DialogHeader>
-            <DialogTitle className="font-sans text-lg font-medium tracking-[-0.01em]">Vizaje team</DialogTitle>
-            <DialogDescription className="text-sm text-smoke">Foundation workspace profile.</DialogDescription>
+            <DialogTitle className="font-sans text-lg font-medium tracking-[-0.01em]">{partnerMode && partner ? partnerName : "Команда Vizaje"}</DialogTitle>
+            <DialogDescription className="text-sm text-smoke">{partnerMode && partner ? "Профиль креатора." : "Профиль рабочего пространства."}</DialogDescription>
           </DialogHeader>
           <div className="mt-2 flex items-center gap-3 border-t border-border pt-4">
-            <div className="flex size-10 items-center justify-center rounded-full bg-[#252a24] text-xs font-medium text-white">V</div>
+            <div
+              className="flex size-10 items-center justify-center rounded-full text-xs font-medium"
+              style={partnerMode && partner ? partnerAvatarStyle : { backgroundColor: "#252a24", color: "#ffffff" }}
+            >
+              {partnerMode && partner ? partnerInitial : "V"}
+            </div>
             <div>
-              <p className="text-sm font-medium text-ink">Vizaje team</p>
-              <p className="text-xs text-smoke">Workspace member</p>
+              <p className="text-sm font-medium text-ink">{partnerMode && partner ? partnerName : "Команда Vizaje"}</p>
+              <p className="text-xs text-smoke">{partnerMode && partner ? partner.email : "Участник рабочего пространства"}</p>
+              {partnerMode && partner?.creatorId ? <p className="mt-1 text-[11px] text-smoke">Creator ID: {partner.creatorId}</p> : null}
             </div>
           </div>
+          {partnerMode && partner ? (
+            <div className="mt-5 flex items-center justify-between gap-4 border-t border-border pt-4">
+              <span className="text-sm text-smoke">Цвет аватара</span>
+              <div className="flex flex-wrap justify-end gap-2" role="group" aria-label="Цвет аватара">
+                {avatarColorOptions.map((option) => {
+                  const selected = avatarColorId === option.id
+                  return (
+                    <button
+                      key={option.id}
+                      type="button"
+                      className={cn("size-6 rounded-full border border-border", selected && "ring-2 ring-ink ring-offset-2")}
+                      style={{ backgroundColor: option.color }}
+                      onClick={() => setAvatarColor(option.id as AvatarColorId)}
+                      aria-label={`Цвет аватара: ${option.id}`}
+                      aria-pressed={selected}
+                    />
+                  )
+                })}
+              </div>
+            </div>
+          ) : null}
+          {mode === "creator" ? (
+            <div className="mt-5 flex items-center justify-between border-t border-border pt-4">
+              <span className="text-sm text-smoke">Язык</span>
+              <LocaleSwitcher locale={locale} className="flex items-center gap-3 text-xs font-medium uppercase" />
+            </div>
+          ) : null}
           <button
             type="button"
             className="mt-5 h-10 w-full rounded-none border border-[#b42318]/40 px-3 text-sm font-medium text-[#8d1d15] hover:bg-[#b42318]/5 disabled:opacity-60"
@@ -281,37 +318,6 @@ export function AppShell({ children, partnerMode = false }: { children: ReactNod
         </DialogContent>
       </Dialog>
 
-      <Dialog
-        open={searchOpen}
-        onOpenChange={(open) => {
-          setSearchOpen(open)
-          if (!open) setSearchQuery("")
-        }}
-      >
-        <DialogContent className="rounded-none border-border bg-white p-0 text-ink sm:max-w-[640px]">
-          <DialogHeader className="border-b border-border px-6 py-5 pr-16">
-            <DialogTitle className="font-sans text-lg font-medium tracking-[-0.01em]">Find anything</DialogTitle>
-            <DialogDescription className="text-sm text-smoke">Search across your Vizaje workspace.</DialogDescription>
-          </DialogHeader>
-          <div className="p-6">
-            <label className="relative flex items-center">
-              <Search className="pointer-events-none absolute left-3 size-[18px] text-smoke" strokeWidth={1.8} aria-hidden="true" />
-              <input
-                autoFocus
-                value={searchQuery}
-                onChange={(event) => setSearchQuery(event.target.value)}
-                className="h-11 w-full rounded-none border border-border bg-white pl-10 pr-3 text-sm text-ink outline-none placeholder:text-smoke focus:border-ink"
-                placeholder="Search partners, agreements, activity..."
-                aria-label="Search workspace"
-              />
-            </label>
-            <div className="mt-6 border border-border px-4 py-8 text-center">
-              <p className="text-sm font-medium text-ink">{searchQuery ? `No results for “${searchQuery}”` : "Start typing to search"}</p>
-              <p className="mt-1 text-xs text-smoke">Partners, agreements, and activity will appear here.</p>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
     </div>
   )
 }

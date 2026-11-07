@@ -322,3 +322,52 @@ Mobile viewport coverage remains untested because the available in-app browser d
 ### Final result
 
 Visual pass complete.
+
+## Creator links page — latest responsive pass
+
+### Source visual truth
+
+- Desktop reference: user attachment `Снимок экрана — 2026-11-04 в 12.33.10.png` from the current conversation.
+- Mobile reference: user attachment `Снимок экрана — 2026-11-04 в 12.33.19.png` from the current conversation.
+- Mobile navigation reference: user attachment `Снимок экрана — 2026-11-04 в 12.32.06.png` from the current conversation.
+- The temporary attachment paths supplied by the desktop app were not persistent files in the workspace, so the comparison used the rendered references visible in the conversation.
+
+### Implementation evidence
+
+- Route checked: `http://localhost:3000/app/links`.
+- Browser: Chrome through the connected CUA browser.
+- Desktop viewport: 1512 × 805 CSS pixels.
+- Mobile viewport: 390 × 844 CSS pixels.
+- State: current session has no active creator access, so the data table/card rows could not be populated without creating or changing account data. The page shell, empty/error state, responsive toolbar, and mobile filter dialog were checked.
+- Screenshot evidence: browser-rendered desktop and mobile captures were emitted during this pass; the browser API does not expose a filesystem screenshot path.
+
+### Fidelity review
+
+- Fonts and typography: the existing Vizaje dashboard typography and restrained hierarchy are retained; the links title, description, summary labels, filters, and state text follow the reference scale.
+- Spacing and layout rhythm: desktop uses the three-column summary grid, wide search/filter toolbar, and bordered content state; mobile switches to compact summary cards, search plus filter button, cards, and bottom-navigation spacing.
+- Colors and visual tokens: the page now receives the creator dashboard tokens on both `/app/links` and `/dashboard/links`; summary status tones, borders, muted surfaces, and primary pill buttons use the existing `--vp-*` tokens.
+- Image quality and asset fidelity: the reference uses standard UI icons; Lucide icons are used through the project’s existing icon system. No raster asset was required.
+- Copy and content: Russian/ Romanian creator copy is wired through the dashboard locale provider; the mobile profile dialog contains the language switcher, settings link, and logout action.
+
+### Primary interactions checked
+
+- Mobile filter button opens the `Фильтры ссылок` dialog and exposes type/status controls.
+- Dialog closes through the shared Dialog close control without console errors.
+- `/dashboard/links` correctly enforces the existing active-creator access guard; no test data or account was created.
+- Desktop `/app/links` renders the new title, action button, summary cards, search field, type/status selects, and error state without style loss.
+- Browser console warnings/errors: none observed during the final route checks.
+
+### Findings
+
+- No actionable P0, P1, or P2 visual findings remain for the reviewed states.
+- Populated creator rows and creator-shell navigation could not be runtime-verified with the current non-creator session; this is a coverage limitation, not a changed data or authorization behavior.
+
+### Comparison history
+
+1. Initial `/app/links` review showed unstyled partner-links content because the creator stylesheet was only imported by the creator layout. The stylesheet was moved to the root layout and the page was given the creator token surface.
+2. The layout was revised to match the reference: summary icon cards, desktop type/status filters, mobile filter dialog, mobile link-card structure, short-path display, copy action, and action menus.
+3. Mobile filter and desktop rendering were rechecked after the changes; the final browser console remained clean.
+
+### Final result
+
+passed

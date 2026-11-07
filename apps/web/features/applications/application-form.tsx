@@ -528,7 +528,6 @@ export function ApplicationForm({ locale }: { locale: Locale }) {
                               value={format}
                               checked={draft.partnershipFormat === format}
                               onChange={() => updateDraft("partnershipFormat", format)}
-                              aria-invalid={Boolean(errors.partnershipFormat)}
                               required
                             />
                             <span>{copy.step3.formatOptions[index]}</span>

@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { hashPassword } from "better-auth/crypto"
-import { eq } from "drizzle-orm"
+import { desc, eq } from "drizzle-orm"
 import { Hono } from "hono"
-import { auditLogs, authAccounts, authSessions, getDb, users } from "@vizaje/db"
+import { auditLogs, authAccounts, authSessions, authVerifications, getDb, passwordResetDeliveries, users } from "@vizaje/db"
 import { bootstrapAdmin } from "../src/cli/bootstrap-admin"
 import { app } from "../src/index"
 import { requirePermission, type ApiEnv, type AuthenticatedRequest } from "../src/auth/middleware"
@@ -11,10 +11,14 @@ import { hasPermission } from "../src/auth/permissions"
 const db = getDb()
 const fixtureEmail = `m2-fixture-${crypto.randomUUID()}@vizaje.local`
 const fixturePassword = "M2-fixture-password-2026"
+const fixtureIpBytes = crypto.getRandomValues(new Uint8Array(2))
+const fixtureIp = `10.240.${fixtureIpBytes[0]}.${fixtureIpBytes[1]}`
 let fixtureUserId = ""
 
 function request(path: string, init?: RequestInit) {
-  return app.fetch(new Request(`http://localhost:3001${path}`, init))
+  const headers = new Headers(init?.headers)
+  headers.set("x-forwarded-for", fixtureIp)
+  return app.fetch(new Request(`http://localhost:3001${path}`, { ...init, headers }))
 }
 
 function sessionCookie(response: Response) {
@@ -60,6 +64,8 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
+  await db.delete(passwordResetDeliveries).where(eq(passwordResetDeliveries.userId, fixtureUserId))
+  await db.delete(authVerifications).where(eq(authVerifications.identifier, fixtureUserId))
   await db.delete(auditLogs).where(eq(auditLogs.actorUserId, fixtureUserId))
   await db.delete(authSessions).where(eq(authSessions.userId, fixtureUserId))
   await db.delete(authAccounts).where(eq(authAccounts.userId, fixtureUserId))
@@ -129,6 +135,72 @@ describe("admin authentication", () => {
       .where(eq(auditLogs.action, "AUTH_LOGOUT"))
     expect(audit.length).toBeGreaterThan(0)
   })
+
+  test("uses a generic reset response and revokes sessions after a single-use reset", async () => {
+    const { cookie: oldSession } = await login()
+    const existing = await request("/v1/auth/request-password-reset", {
+      method: "POST",
+      headers: { origin: "http://localhost:3000", "content-type": "application/json" },
+      body: JSON.stringify({ email: fixtureEmail, redirectTo: "http://localhost:3000/reset-password" }),
+    })
+    const unknown = await request("/v1/auth/request-password-reset", {
+      method: "POST",
+      headers: { origin: "http://localhost:3000", "content-type": "application/json" },
+      body: JSON.stringify({ email: "does-not-exist@vizaje.local", redirectTo: "http://localhost:3000/reset-password" }),
+    })
+    expect(existing.status).toBe(200)
+    expect(unknown.status).toBe(existing.status)
+    expect(await existing.text()).toBe(await unknown.text())
+
+    const verification = await db
+      .select({ identifier: authVerifications.identifier })
+      .from(authVerifications)
+      .where(eq(authVerifications.value, fixtureUserId))
+      .orderBy(desc(authVerifications.createdAt))
+      .limit(1)
+    const token = verification[0]?.identifier.replace(/^reset-password:/, "")
+    expect(token).toBeTruthy()
+
+    const reset = await request("/v1/auth/reset-password", {
+      method: "POST",
+      headers: { origin: "http://localhost:3000", "content-type": "application/json" },
+      body: JSON.stringify({ token, newPassword: "P1.1-reset-password-2026" }),
+    })
+    expect(reset.status).toBe(200)
+    expect(await (await request("/v1/auth/get-session", { headers: { cookie: oldSession! } })).json()).toBeNull()
+
+    const reused = await request("/v1/auth/reset-password", {
+      method: "POST",
+      headers: { origin: "http://localhost:3000", "content-type": "application/json" },
+      body: JSON.stringify({ token, newPassword: "P1.1-reset-password-2026" }),
+    })
+    expect(reused.status).toBe(400)
+
+    const expiredRequest = await request("/v1/auth/request-password-reset", {
+      method: "POST",
+      headers: { origin: "http://localhost:3000", "content-type": "application/json" },
+      body: JSON.stringify({ email: fixtureEmail, redirectTo: "http://localhost:3000/reset-password" }),
+    })
+    expect(expiredRequest.status).toBe(200)
+    const expiredVerification = await db
+      .select({ identifier: authVerifications.identifier })
+      .from(authVerifications)
+      .where(eq(authVerifications.value, fixtureUserId))
+      .orderBy(desc(authVerifications.createdAt))
+      .limit(1)
+    const expiredIdentifier = expiredVerification[0]?.identifier
+    const expiredToken = expiredIdentifier?.replace(/^reset-password:/, "")
+    expect(expiredToken).toBeTruthy()
+    await db.update(authVerifications).set({ expiresAt: new Date(Date.now() - 60_000) }).where(eq(authVerifications.identifier, expiredIdentifier!))
+    const expired = await request("/v1/auth/reset-password", {
+      method: "POST",
+      headers: { origin: "http://localhost:3000", "content-type": "application/json" },
+      body: JSON.stringify({ token: expiredToken, newPassword: "P1.1-reset-password-2026" }),
+    })
+    expect(expired.status).toBe(400)
+    expect((await login()).response.status).toBe(401)
+    expect((await login("P1.1-reset-password-2026")).response.status).toBe(200)
+  })
 })
 
 describe("permissions and bootstrap", () => {
@@ -136,6 +208,9 @@ describe("permissions and bootstrap", () => {
     expect(hasPermission("super_admin", "users:manage")).toBe(true)
     expect(hasPermission("analyst", "users:manage")).toBe(false)
     expect(hasPermission("finance", "agreements:write")).toBe(true)
+    expect(hasPermission("finance", "finance:read")).toBe(true)
+    expect(hasPermission("finance", "finance:write")).toBe(true)
+    expect(hasPermission("finance", "settings:write")).toBe(false)
     expect(hasPermission("support", "agreements:write")).toBe(false)
   })
 

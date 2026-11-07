@@ -14,6 +14,7 @@ import {
 } from "@vizaje/db"
 import type { CreatorApplicationInput } from "@vizaje/contracts"
 import { logger } from "../../logger"
+import { consumeRateLimit } from "../../http/rate-limit"
 import {
   createApplicationEmailContent,
   deriveActivationToken,
@@ -24,13 +25,11 @@ import {
   processEmailDelivery,
   type ApplicationEmailEvent,
 } from "./email-delivery"
+import { notifyCreatorApplicationDecision, notifyCreatorApplicationSubmitted } from "../notifications/service"
 
 export class ApplicationConflictError extends Error {}
 export class CreatorActivationError extends Error {}
 
-const WINDOW_MS = 15 * 60 * 1000
-const MAX_APPLICATIONS_PER_KEY = 5
-const rateLimitBuckets = new Map<string, { startedAt: number; count: number }>()
 const ACTIVATION_LIFETIME_MS = 7 * 24 * 60 * 60 * 1000
 
 async function createInvitationSecret() {
@@ -54,16 +53,9 @@ function attemptDeliveryAfterCommit(deliveryId: string | undefined) {
   })
 }
 
-export function consumeApplicationRateLimit(key: string) {
-  const now = Date.now()
-  const current = rateLimitBuckets.get(key)
-  if (!current || now - current.startedAt >= WINDOW_MS) {
-    rateLimitBuckets.set(key, { startedAt: now, count: 1 })
-    return true
-  }
-  if (current.count >= MAX_APPLICATIONS_PER_KEY) return false
-  current.count += 1
-  return true
+export async function consumeApplicationRateLimit(key: string) {
+  const result = await consumeRateLimit(`application:${key}`, 5, 15 * 60 * 1000)
+  return result.allowed
 }
 
 export async function createCreatorApplication(input: CreatorApplicationInput, _ipAddress: string | null) {
@@ -107,6 +99,7 @@ export async function createCreatorApplication(input: CreatorApplicationInput, _
         createdAt: now,
         updatedAt: now,
       }).returning({ id: emailDeliveries.id })
+      await notifyCreatorApplicationSubmitted(tx, application.id)
 
       return { application, deliveryId: deliveryRows[0]?.id }
     })
@@ -239,6 +232,7 @@ export async function approveCreatorApplication(applicationId: string, reviewerU
       metadata: { partnerId: partner.id, creatorId, invitationId: invitation.id, invitationDelivery: "queued" },
       createdAt: now,
     })
+    await notifyCreatorApplicationDecision(tx, applicationId, partner.id, "approved", application.locale)
 
     return {
       kind: "approved" as const,
@@ -288,6 +282,7 @@ export async function rejectCreatorApplication(applicationId: string, reviewerUs
       metadata: { reason },
       createdAt: now,
     })
+    await notifyCreatorApplicationDecision(tx, applicationId, application.partnerId, "rejected", application.locale)
 
     return { kind: "rejected" as const, application: { ...application, status: "rejected" as const }, deliveryId: deliveryRows[0]?.id }
   })
@@ -349,6 +344,9 @@ export async function activateCreatorAccount(token: string, password: string) {
       email: current.partner.email!,
       name: current.partner.displayName,
       emailVerified: true,
+      // Creator accounts share the administrator user table for Better Auth.
+      // `requireAdminAccess` rejects linked creator accounts before any admin
+      // permission is evaluated, including legacy rows with this role value.
       role: "analyst",
       isActive: true,
       createdAt: now,

@@ -4,6 +4,7 @@ import { cookies } from "next/headers";
 import { Providers } from "./providers";
 import { localeCookieName, normalizeLocale } from "@/lib/translations";
 import "./globals.css";
+import "./dashboard/creator-dashboard.css";
 
 export const metadata: Metadata = {
   title: {

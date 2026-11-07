@@ -36,6 +36,32 @@ export const requireAuth: MiddlewareHandler<ApiEnv> = async (c, next) => {
   await next()
 }
 
+/**
+ * Creator accounts share the Better Auth session table with administrators,
+ * but they must never inherit an administrator permission through a legacy
+ * role value. Keep this check separate from RBAC so existing creator rows
+ * remain protected until their role value is migrated.
+ */
+export const requireAdminAccess: MiddlewareHandler<ApiEnv> = async (c, next) => {
+  const current = c.get("auth")
+  if (!current) {
+    return c.json({ status: "error", error: { code: "UNAUTHENTICATED", message: "Authentication required" } }, 401)
+  }
+
+  const creatorAccount = await getDb()
+    .select({ partnerId: partnerAccounts.partnerId })
+    .from(partnerAccounts)
+    .innerJoin(partners, eq(partnerAccounts.partnerId, partners.id))
+    .where(and(eq(partnerAccounts.userId, current.user.id), eq(partners.type, "creator")))
+    .limit(1)
+
+  if (creatorAccount[0]) {
+    return c.json({ status: "error", error: { code: "ADMIN_ACCESS_REQUIRED", message: "Administrator access is required" } }, 403)
+  }
+
+  await next()
+}
+
 export function requirePermission(permission: Permission): MiddlewareHandler<ApiEnv> {
   return async (c, next) => {
     const current = c.get("auth")

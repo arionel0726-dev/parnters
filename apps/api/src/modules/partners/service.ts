@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm"
 import { auditLogs, getDb, partnerAgreements, partners } from "@vizaje/db"
+import { notifyPartnerCommissionChanged, notifyPartnerStatusChanged } from "../notifications/service"
 
 export async function updatePartnerStatus(partnerId: string, status: "active" | "suspended" | "banned", reason: string, actorUserId: string) {
   return getDb().transaction(async (tx) => {
@@ -21,6 +22,7 @@ export async function updatePartnerStatus(partnerId: string, status: "active" | 
       metadata: { from: partner.status, to: status, reason },
       createdAt: now,
     })
+    await notifyPartnerStatusChanged(tx, partnerId, status)
     return { kind: "updated" as const, partner: updated }
   })
 }
@@ -82,6 +84,7 @@ export async function createPartnerAgreement(
       metadata: { agreementId: agreement.id, commissionRate: input.commissionRate, startsAt: input.startsAt, reason: input.reason },
       createdAt: now,
     })
+    await notifyPartnerCommissionChanged(tx, partnerId, agreement.id)
     return { kind: "created" as const, agreement }
   })
 }
