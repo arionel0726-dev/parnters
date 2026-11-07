@@ -2,6 +2,8 @@ import type { NextConfig } from 'next'
 import path from 'node:path'
 
 const nextConfig: NextConfig = {
+	output: 'standalone',
+	outputFileTracingRoot: path.join(__dirname, '../..'),
 	transpilePackages: ['@vizaje/contracts'],
 	distDir: process.env.NEXT_DIST_DIR ?? '.next',
 	// The Next.js devtools overlay can throw releasePointerCapture errors in Chrome
