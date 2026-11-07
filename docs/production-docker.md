@@ -5,8 +5,8 @@ This configuration is for the VPS layout described in P2.1. It does not deploy a
 ## Files
 
 - `Dockerfile.web` builds the Next.js production server with Next standalone output.
-- `Dockerfile.api` builds the Bun/Hono API and includes the Drizzle migration files for a separate one-shot migration command.
-- `compose.production.yml` defines the independent Compose project `vizaje-partners` with `web`, `api`, and `postgres`.
+- `Dockerfile.api` builds the Bun/Hono API and a separate `migration` target with Drizzle Kit.
+- `compose.production.yml` defines the independent Compose project `vizaje-partners` with `web`, `api`, `postgres`, and an explicitly profiled `migrate` service.
 - `.env.production.example` contains placeholders only. Copy it to `.env.production` on the server and keep the real file outside Git.
 
 The Compose network is `vizaje-partners-internal`. PostgreSQL has no published host port. Web and API are bound only to localhost for host-installed Nginx:
@@ -28,18 +28,21 @@ cp .env.production.example .env.production
 chmod 600 .env.production
 # Edit .env.production and replace every placeholder.
 
-docker compose --env-file .env.production -f compose.production.yml config
-docker compose --env-file .env.production -f compose.production.yml build --pull
+docker compose --env-file .env.production --profile migrations -f compose.production.yml config
+docker compose --env-file .env.production --profile migrations -f compose.production.yml build --pull api web migrate
 docker compose --env-file .env.production -f compose.production.yml up -d postgres
 
-# Apply pending migrations once, explicitly. This never runs as part of `up`.
-docker compose --env-file .env.production -f compose.production.yml run --rm --no-deps --entrypoint bun api run --cwd packages/db db:migrate
+# Confirm the migration image contains the workspace-local Drizzle Kit binary.
+docker compose --env-file .env.production --profile migrations -f compose.production.yml run --rm --no-deps --entrypoint sh migrate -lc 'test -x packages/db/node_modules/.bin/drizzle-kit && packages/db/node_modules/.bin/drizzle-kit --version'
+
+# Apply pending migrations once, explicitly. This never runs as part of normal `up`.
+docker compose --env-file .env.production --profile migrations -f compose.production.yml run --rm --no-deps migrate
 
 docker compose --env-file .env.production -f compose.production.yml up -d api web
 docker compose --env-file .env.production -f compose.production.yml ps
 ```
 
-Do not run `db:generate`, `db:push`, reset commands, seed commands, or automatic migrations in a replica startup hook. The API image contains migrations through `0014`; the one-shot command applies only pending migrations tracked by Drizzle.
+The API runtime image does not contain Drizzle Kit. The profiled migration image contains migrations through `0014` and the workspace-local `drizzle-kit` binary. Do not run `db:generate`, `db:push`, reset commands, seed commands, or automatic migrations in a replica startup hook. The one-shot command applies only pending migrations tracked by Drizzle.
 
 ## Health checks
 

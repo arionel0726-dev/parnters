@@ -1,4 +1,4 @@
-FROM oven/bun:1.3.14-alpine AS dependencies
+FROM oven/bun:1.3.14-alpine AS workspace
 
 WORKDIR /app
 
@@ -8,7 +8,20 @@ COPY apps/web/package.json apps/web/package.json
 COPY packages/contracts/package.json packages/contracts/package.json
 COPY packages/db/package.json packages/db/package.json
 
-RUN bun install --frozen-lockfile
+FROM workspace AS runtime-dependencies
+
+ENV NODE_ENV=production
+
+RUN bun install --frozen-lockfile --production
+
+FROM workspace AS migration-dependencies
+
+# drizzle-kit is a devDependency of @vizaje/db. Keep it in a dedicated
+# migration dependency tree instead of shipping it with the API runtime.
+ENV NODE_ENV=development
+
+RUN bun install --frozen-lockfile \
+  && test -x packages/db/node_modules/.bin/drizzle-kit
 
 FROM oven/bun:1.3.14-alpine AS runtime
 
@@ -16,9 +29,12 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 
-COPY --from=dependencies /app/node_modules ./node_modules
-COPY --from=dependencies /app/package.json ./package.json
-COPY --from=dependencies /app/bun.lock ./bun.lock
+COPY --from=runtime-dependencies /app/node_modules ./node_modules
+COPY --from=runtime-dependencies /app/apps/api/node_modules ./apps/api/node_modules
+COPY --from=runtime-dependencies /app/packages/contracts/node_modules ./packages/contracts/node_modules
+COPY --from=runtime-dependencies /app/packages/db/node_modules ./packages/db/node_modules
+COPY --from=runtime-dependencies /app/package.json ./package.json
+COPY --from=runtime-dependencies /app/bun.lock ./bun.lock
 COPY apps/api ./apps/api
 COPY packages ./packages
 
@@ -27,3 +43,19 @@ USER bun
 EXPOSE 3001
 
 CMD ["bun", "run", "apps/api/src/index.ts"]
+
+FROM oven/bun:1.3.14-alpine AS migration
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+
+COPY --from=migration-dependencies /app/node_modules ./node_modules
+COPY --from=migration-dependencies /app/packages/db/node_modules ./packages/db/node_modules
+COPY --from=migration-dependencies /app/package.json ./package.json
+COPY --from=migration-dependencies /app/bun.lock ./bun.lock
+COPY packages/db ./packages/db
+
+USER bun
+
+CMD ["bun", "run", "--cwd", "packages/db", "db:migrate"]

@@ -66,6 +66,21 @@ services:
       retries: 12
       start_period: 20s
 
+  migrate:
+    profiles:
+      - migrations
+    image: vizaje-partners-migrate:production
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+      target: migration
+    restart: "no"
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+    networks:
+      - internal
+
   web:
     image: vizaje-partners-web:production
     build:
