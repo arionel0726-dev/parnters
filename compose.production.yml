@@ -24,6 +24,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.api
+      target: runtime
     restart: unless-stopped
     init: true
     environment:
