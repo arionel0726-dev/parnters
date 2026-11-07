@@ -180,7 +180,7 @@ function validateCanonicalPath(path: string, locale: ResolverLocale, type: Resol
   if (!path.startsWith("/") || path.startsWith("//") || path.includes("\\") || path.includes("?") || path.includes("#") || /%2f|%5c/i.test(path)) return false
   if (/(?:^|\/)\.{1,2}(?:\/|$)/.test(path) || /%2e/i.test(path)) return false
   if (type === "homepage") return path === "/" || path === `/${locale}` || path === `/${locale}/`
-  if (type === "brand") return new RegExp(`^/${locale}/brands/[^/]+/?$`).test(path)
+  if (type === "brand") return new RegExp(`^/${locale}/(?:brands?/[^/]+|(?:catalog|katalog)/[^/]+)/?$`).test(path)
   if (!hasLocalePrefix(path, locale)) return false
   const localized = path.slice(locale.length + 2)
   if (type === "category") return /^(?:(?:catalog|katalog)\/)?categories?\/[^/]+(?:\/[^/]+)*\/?$/.test(localized)
@@ -209,8 +209,8 @@ function validateResponseSemantics(
   // Legacy uses one shared brand URI, while the locale prefix differs. Reject
   // inconsistent snapshots rather than persisting two unrelated brand pages.
   if (input.expectedType === "brand" && value.targets.ru.available && value.targets.ro.available) {
-    const ruUri = value.targets.ru.path.match(/^\/ru\/brands\/([^/]+)\/?$/)?.[1]
-    const roUri = value.targets.ro.path.match(/^\/ro\/brands\/([^/]+)\/?$/)?.[1]
+    const ruUri = value.targets.ru.path.match(/^\/ru\/(?:brands?|(?:catalog|katalog))\/([^/]+)\/?$/)?.[1]
+    const roUri = value.targets.ro.path.match(/^\/ro\/(?:brands?|(?:catalog|katalog))\/([^/]+)\/?$/)?.[1]
     if (!ruUri || !roUri || ruUri !== roUri) return false
   }
 
@@ -296,7 +296,7 @@ function validateOutgoingTarget(input: ResolveTargetInput) {
   if (
     !rawPathIsSafe(input.target) ||
     !validateCanonicalPath(input.target, input.requestedLocale, input.expectedType) &&
-      !(input.expectedType === "brand" && /^\/(?:ru|ro)\/brands\/[^/]+\/?$/.test(input.target))
+      !(input.expectedType === "brand" && /^\/(?:ru|ro)\/(?:brands?|(?:catalog|katalog))\/[^/]+\/?$/.test(input.target))
   ) throw new LegacyResolverRejectedError("INVALID_TARGET", 400, false)
   // The client deliberately sends only a validated relative path. Legacy owns the
   // canonical origin and entity lookup; a client-supplied host cannot redirect it.

@@ -17,7 +17,7 @@ The M5.1 ticket/HMAC/Legacy claim flow remains specification-only in [docs/m5.1-
 - `code` is exactly 10 characters from `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`, unique in PostgreSQL, and independent of the sequential Creator ID.
 - `GET /r/{code}` calls the protected internal validation API and issues a redirect to the validated stored destination. The route does not set tracking cookies or record a click.
 - The stored target is `targetProtocol://targetHost + targetPath`. `targetPath` retains the original RU/RO path and allowed query string.
-- Only hosts in `VIZAJE_DESTINATION_HOSTS` and the approved homepage, product, category and brand path patterns are accepted. Credentials, fragments and redirect-like query parameters are rejected.
+- Only hosts in `VIZAJE_DESTINATION_HOSTS` and the approved homepage, product, category and brand path patterns are accepted. Vizaje-Nica uses the shared `/ru|ro/catalog/` route: one slug is accepted when the selected type is `brand` or `category`, and two slugs are accepted for `product`. The selected `linkType` is stored and is not inferred from URL depth; Legacy remains the authority for entity identity. Credentials, fragments, unsafe encoded path segments and redirect-like query parameters are rejected.
 
 ## Internal validation
 

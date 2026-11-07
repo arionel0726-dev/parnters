@@ -6,6 +6,7 @@ import { requireFeature } from "../src/http/feature-flags"
 import type { ApiEnv } from "../src/auth/middleware"
 import { hasAmbiguousDeliveryOutcome, EMAIL_RECONCILIATION_REQUIRED } from "../src/modules/applications/email-delivery"
 import { AUDIT_LOG_RETENTION_DAYS, getAuditLogRetentionCutoff } from "../src/modules/audit/retention"
+import { InvalidReferralDestinationError, parseReferralDestination } from "../src/modules/referral-links/destinations"
 import { generateReferralCode } from "../src/modules/referral-links/service"
 
 describe("pure referral and delivery invariants", () => {
@@ -13,6 +14,28 @@ describe("pure referral and delivery invariants", () => {
     const code = generateReferralCode()
     expect(code).toMatch(/^[A-HJ-NP-Z2-9]{10}$/)
     expect(referralCodeInputSchema.safeParse({ code }).success).toBe(true)
+  })
+
+  test.each([
+    ["brand", "ru", "https://vizaje-nica.com/ru/catalog/anastasia-beverly-hills"],
+    ["brand", "ro", "https://vizaje-nica.com/ro/catalog/anastasia-beverly-hills"],
+    ["category", "ru", "https://vizaje-nica.com/ru/catalog/ten-piele"],
+    ["category", "ro", "https://vizaje-nica.com/ro/catalog/ten-piele"],
+    ["product", "ru", "https://vizaje-nica.com/ru/catalog/ten-piele/anastasia-paleta"],
+    ["product", "ro", "https://vizaje-nica.com/ro/catalog/ten-piele/anastasia-paleta"],
+  ] as const)("accepts the %s %s shared catalog route without inferring entity identity", (linkType, _locale, targetUrl) => {
+    const parsed = parseReferralDestination(targetUrl, linkType)
+    expect(parsed.targetPath).toBe(new URL(targetUrl).pathname)
+    expect(parsed.targetHost).toBe("vizaje-nica.com")
+  })
+
+  test("keeps shared catalog types distinct and rejects invalid shapes or unsafe paths", () => {
+    expect(() => parseReferralDestination("https://vizaje-nica.com/ro/catalog/ten-piele", "product")).toThrow(InvalidReferralDestinationError)
+    expect(() => parseReferralDestination("https://vizaje-nica.com/ro/catalog/ten-piele/anastasia-paleta", "brand")).toThrow(InvalidReferralDestinationError)
+    expect(() => parseReferralDestination("https://example.com/ro/catalog/anastasia-beverly-hills", "brand")).toThrow(InvalidReferralDestinationError)
+    expect(() => parseReferralDestination("https://vizaje-nica.com/ro/catalog/%2e%2e/brand", "brand")).toThrow(InvalidReferralDestinationError)
+    expect(() => parseReferralDestination("https://vizaje-nica.com/ro/catalog/ten-piele/../brand", "brand")).toThrow(InvalidReferralDestinationError)
+    expect(() => parseReferralDestination("https://vizaje-nica.com/ro/catalog/brand/%2fproduct", "product")).toThrow(InvalidReferralDestinationError)
   })
 
   test("validates versioned order events and rejects unknown event types", () => {

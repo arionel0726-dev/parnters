@@ -171,6 +171,52 @@ describe("creator dashboard and referral links", () => {
     expect(body.link.expiresAt).toBe(expiresAt)
   })
 
+  test("creates, stores and resolves shared catalog brand, category and product links", async () => {
+    const cases = [
+      { linkType: "brand", targetUrl: "https://vizaje-nica.com/ro/catalog/anastasia-beverly-hills" },
+      { linkType: "category", targetUrl: "https://vizaje-nica.com/ru/catalog/ten-piele" },
+      { linkType: "product", targetUrl: "https://vizaje-nica.com/ro/catalog/ten-piele/anastasia-paleta" },
+    ] as const
+    const createdIds: string[] = []
+    const createdCodes: string[] = []
+
+    try {
+      for (const input of cases) {
+        const response = await partnerRequest("/v1/partner/referral-links", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(input),
+        })
+        expect(response.status).toBe(201)
+        const body = await response.json() as { link: { id: string; code: string; linkType: string; targetPath: string; targetUrl: string } }
+        createdIds.push(body.link.id)
+        createdCodes.push(body.link.code)
+        expect(body.link).toMatchObject({ linkType: input.linkType, targetPath: new URL(input.targetUrl).pathname, targetUrl: input.targetUrl })
+
+        const detail = await partnerRequest(`/v1/partner/referral-links/${body.link.id}`)
+        expect(detail.status).toBe(200)
+        expect((await detail.json() as { link: { linkType: string; targetPath: string } }).link).toMatchObject({ linkType: input.linkType, targetPath: new URL(input.targetUrl).pathname })
+      }
+
+      for (const [index, code] of createdCodes.entries()) {
+        const redirected = await request("/v1/internal/referral-links/click", {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-service-token": serviceToken },
+          body: JSON.stringify({ code }),
+        })
+        expect(redirected.status).toBe(200)
+        const body = await redirected.json() as { valid: boolean; link: { linkType: string; targetUrl: string } }
+        expect(body).toMatchObject({ valid: true, link: { linkType: cases[index]!.linkType, targetUrl: cases[index]!.targetUrl } })
+      }
+    } finally {
+      if (createdIds.length) {
+        await db.delete(referralLinkClicks).where(inArray(referralLinkClicks.referralLinkId, createdIds))
+        await db.delete(auditLogs).where(inArray(auditLogs.entityId, createdIds))
+        await db.delete(referralLinks).where(inArray(referralLinks.id, createdIds))
+      }
+    }
+  })
+
   test("records clicks, ingests an order idempotently and exposes creator finance data", async () => {
     expect((await request("/v1/internal/referral-orders/events", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status).toBe(401)
     const click = await request("/v1/internal/referral-links/click", {
@@ -281,6 +327,29 @@ describe("creator dashboard and referral links", () => {
     expect(afterCancellationBody.summary).toMatchObject({ orders: 0, commission: "0", availableByCurrency: [{ currency: "MDL", amount: "0.00" }] })
   })
 
+  test("resolves an active link without recording analytics when tracking is disabled", async () => {
+    const before = await db.select({ id: referralLinkClicks.id }).from(referralLinkClicks).where(eq(referralLinkClicks.referralLinkId, activeLinkId))
+    process.env.REFERRAL_TRACKING_ENABLED = "false"
+
+    try {
+      const response = await request("/v1/internal/referral-links/click", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-service-token": serviceToken, "x-referral-locale": "ro" },
+        body: JSON.stringify({ code: activeCode }),
+      })
+      expect(response.status).toBe(200)
+      expect((await response.json() as { valid: boolean; link: { code: string; targetUrl: string } })).toMatchObject({
+        valid: true,
+        link: { code: activeCode, targetUrl: "https://vizaje-nica.com/ro/" },
+      })
+
+      const after = await db.select({ id: referralLinkClicks.id }).from(referralLinkClicks).where(eq(referralLinkClicks.referralLinkId, activeLinkId))
+      expect(after).toHaveLength(before.length)
+    } finally {
+      process.env.REFERRAL_TRACKING_ENABLED = "true"
+    }
+  })
+
   test("returns creator link details and prevents cross-creator reads, rename and revoke", async () => {
     const detail = await partnerRequest(`/v1/partner/referral-links/${activeLinkId}`)
     expect(detail.status).toBe(200)
@@ -366,8 +435,10 @@ describe("creator dashboard and referral links", () => {
   test("protects internal validation, honors expiration and invalidates revoked codes", async () => {
     const unauthorized = await request("/v1/internal/referral-links/validate", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: activeCode }) })
     const invalidToken = await serviceValidate(activeCode, "wrong")
+    const invalidClickToken = await request("/v1/internal/referral-links/click", { method: "POST", headers: { "content-type": "application/json", "x-service-token": "wrong" }, body: JSON.stringify({ code: activeCode }) })
     expect(unauthorized.status).toBe(401)
     expect(invalidToken.status).toBe(401)
+    expect(invalidClickToken.status).toBe(401)
 
     const valid = await serviceValidate(activeCode)
     expect(valid.status).toBe(200)
@@ -381,6 +452,13 @@ describe("creator dashboard and referral links", () => {
     expect((await expiredDetail.json() as { link: { isExpired: boolean } }).link.isExpired).toBe(true)
     const expiredValidation = await serviceValidate(expiringBody.link.code)
     expect((await expiredValidation.json() as { valid: boolean }).valid).toBe(false)
+    const expiredRedirect = await request("/v1/internal/referral-links/click", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-service-token": serviceToken },
+      body: JSON.stringify({ code: expiringBody.link.code }),
+    })
+    expect(expiredRedirect.status).toBe(200)
+    expect((await expiredRedirect.json() as { valid: boolean }).valid).toBe(false)
 
     const revoke = await partnerRequest(`/v1/partner/referral-links/${activeLinkId}/revoke`, { method: "PATCH" })
     expect(revoke.status).toBe(200)
@@ -388,6 +466,13 @@ describe("creator dashboard and referral links", () => {
     const afterRevoke = await serviceValidate(activeCode)
     expect(afterRevoke.status).toBe(200)
     expect((await afterRevoke.json() as { valid: boolean }).valid).toBe(false)
+    const afterRevokeRedirect = await request("/v1/internal/referral-links/click", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-service-token": serviceToken },
+      body: JSON.stringify({ code: activeCode }),
+    })
+    expect(afterRevokeRedirect.status).toBe(200)
+    expect((await afterRevokeRedirect.json() as { valid: boolean }).valid).toBe(false)
     const repeated = await partnerRequest(`/v1/partner/referral-links/${activeLinkId}/revoke`, { method: "PATCH" })
     expect((await repeated.json() as { idempotent: boolean }).idempotent).toBe(true)
   })

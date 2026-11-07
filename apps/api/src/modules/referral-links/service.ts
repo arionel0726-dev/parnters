@@ -46,9 +46,13 @@ export function serializeReferralLink(link: typeof referralLinks.$inferSelect) {
   return { ...publicLink, isExpired: Boolean(link.expiresAt && link.expiresAt.getTime() <= Date.now()), shortUrl, targetUrl, clicks: 0, orders: 0 }
 }
 
-export async function recordReferralClick(code: string, locale: "ru" | "ro" | null) {
-  const result = await getActiveReferralLinkByCode(code)
-  if (!result?.creatorId) return null
+type ActiveReferralLink = NonNullable<Awaited<ReturnType<typeof getActiveReferralLinkByCode>>>
+
+export async function resolveActiveReferralCode(code: string) {
+  return getActiveReferralLinkByCode(code)
+}
+
+export async function recordReferralClickForResolvedLink(result: ActiveReferralLink, locale: "ru" | "ro" | null) {
   await getDb().insert(referralLinkClicks).values({
     referralLinkId: result.link.id,
     partnerId: result.link.partnerId,
@@ -58,6 +62,13 @@ export async function recordReferralClick(code: string, locale: "ru" | "ro" | nu
     updatedAt: new Date(),
   })
   return result
+}
+
+export async function recordReferralClick(code: string, locale: "ru" | "ro" | null) {
+  const result = await resolveActiveReferralCode(code)
+  if (!result) return null
+  if (!getApiEnv().REFERRAL_TRACKING_ENABLED) return result
+  return recordReferralClickForResolvedLink(result, locale)
 }
 
 export async function createReferralLink(partnerId: string, input: ReferralLinkCreateInput, actorUserId: string) {
@@ -209,7 +220,7 @@ export async function revokeReferralLink(partnerId: string, linkId: string, acto
 }
 
 export async function validateActiveReferralCode(code: string) {
-  const result = await getActiveReferralLinkByCode(code)
+  const result = await resolveActiveReferralCode(code)
   if (!result) return null
   return {
     ...serializeReferralLink(result.link),

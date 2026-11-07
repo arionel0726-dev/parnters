@@ -9,12 +9,23 @@ export class InvalidReferralDestinationError extends Error {
 
 const pathRules = {
   homepage: /^(?:\/(?:ru|ro)\/?)?$/,
-  // Vizaje-Nica product pages use both the explicit products route and
-  // catalog/category-slug/numeric-product-id (for example /ro/catalog/kisti/1648).
-  product: /^\/(?:ru|ro)\/(?:(?:catalog\/)?products?\/[^/]+(?:\/[^/]+)*|catalog\/[^/]+\/\d+)\/?$/,
-  category: /^\/(?:ru|ro)\/(?:catalog\/)?categories?\/[^/]+(?:\/[^/]+)*\/?$/,
-  brand: /^\/(?:ru|ro)\/brands?\/[^/]+(?:\/[^/]+)*\/?$/,
+  // Vizaje-Nica uses the same catalog prefix for categories, brands and
+  // products. The selected linkType remains the source of intent: a single
+  // catalog slug is valid for either a category or a brand, while a pair of
+  // slugs is a product route. Legacy remains the authority for entity lookup.
+  product: /^\/(?:ru|ro)\/(?:(?:(?:catalog|katalog)\/)?products?\/[^/]+(?:\/[^/]+)*|(?:catalog|katalog)\/[^/]+\/[^/]+)\/?$/,
+  category: /^\/(?:ru|ro)\/(?:(?:(?:catalog|katalog)\/)?categories?\/[^/]+(?:\/[^/]+)*|(?:catalog|katalog)\/[^/]+)\/?$/,
+  brand: /^\/(?:ru|ro)\/(?:(?:brands?\/[^/]+(?:\/[^/]+)*)|(?:catalog|katalog)\/[^/]+)\/?$/,
 } as const
+
+function isSafePath(path: string) {
+  return path.startsWith("/") && !path.startsWith("//") && !path.includes("\\") &&
+    !/%(?:2f|5c|2e)/i.test(path) && !/(?:^|\/)\.{1,2}(?:\/|$)/.test(path)
+}
+
+function rawAbsolutePath(value: string) {
+  return value.match(/^[a-z][a-z\d+.-]*:\/\/[^/?#]*(\/[^?#]*)?(?:[?#]|$)/i)?.[1] ?? null
+}
 
 export type ReferralDestination = {
   targetProtocol: "http" | "https"
@@ -23,6 +34,11 @@ export type ReferralDestination = {
 }
 
 export function parseReferralDestination(targetUrl: string, linkType: keyof typeof pathRules): ReferralDestination {
+  const rawPath = rawAbsolutePath(targetUrl)
+  if (rawPath && !isSafePath(rawPath)) {
+    throw new InvalidReferralDestinationError("Ссылка содержит небезопасный путь.")
+  }
+
   let parsed: URL
   try {
     parsed = new URL(targetUrl)
@@ -47,6 +63,9 @@ export function parseReferralDestination(targetUrl: string, linkType: keyof type
   }
 
   const pathname = parsed.pathname || "/"
+  if (!isSafePath(pathname)) {
+    throw new InvalidReferralDestinationError("Ссылка содержит небезопасный путь.")
+  }
   if (!pathRules[linkType].test(pathname)) {
     throw new InvalidReferralDestinationError("Путь не соответствует выбранному типу ссылки.")
   }

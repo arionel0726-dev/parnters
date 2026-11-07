@@ -2,12 +2,12 @@ import { referralCodeInputSchema, referralLinkCreateSchema, referralLinkListQuer
 import { Hono } from "hono"
 import type { ApiEnv } from "../../auth/middleware"
 import { requireAuth, requirePartner } from "../../auth/middleware"
+import { getApiEnv } from "../../env"
 import { apiError } from "../../http/errors"
-import { requireFeature } from "../../http/feature-flags"
 import { rateLimit } from "../../http/rate-limit"
 import { listReferralLinks, getReferralLinkForPartner, getReferralLinksForPartner, getReferralLinkStats } from "./repository"
 import { InvalidReferralDestinationError } from "./destinations"
-import { createReferralLink, recordReferralClick, renameReferralLink, revokeReferralLink, serializeReferralLink, validateActiveReferralCode } from "./service"
+import { createReferralLink, recordReferralClickForResolvedLink, renameReferralLink, resolveActiveReferralCode, revokeReferralLink, serializeReferralLink, validateActiveReferralCode } from "./service"
 import {
   LegacyResolverConfigurationError,
   LegacyResolverInvalidResponseError,
@@ -113,7 +113,7 @@ partnerReferralLinkRoutes.patch("/:id/revoke", async (c) => {
 export const internalReferralLinkRoutes = new Hono<ApiEnv>()
 
 internalReferralLinkRoutes.use("/validate", rateLimit("internal-referral-validation", 120, 60_000))
-internalReferralLinkRoutes.use("/click", rateLimit("internal-referral-click", 600, 60_000), requireFeature("REFERRAL_TRACKING_ENABLED"))
+internalReferralLinkRoutes.use("/click", rateLimit("internal-referral-click", 600, 60_000))
 
 internalReferralLinkRoutes.post("/validate", async (c) => {
   let payload: unknown
@@ -137,10 +137,16 @@ internalReferralLinkRoutes.post("/click", async (c) => {
   }
   const parsed = referralCodeInputSchema.safeParse(payload)
   if (!parsed.success) return apiError(c, 400, "VALIDATION_ERROR", "Укажите корректный referral code.", parsed.error.flatten().fieldErrors)
-  const requestedLocale = c.req.header("x-referral-locale")
-  const locale = requestedLocale === "ru" || requestedLocale === "ro" ? requestedLocale : null
-  const result = await recordReferralClick(parsed.data.code, locale)
-  return c.json(result ? { valid: true, link: serializeReferralLink(result.link) } : { valid: false })
+  const result = await resolveActiveReferralCode(parsed.data.code)
+  if (!result) return c.json({ valid: false })
+
+  if (getApiEnv().REFERRAL_TRACKING_ENABLED) {
+    const requestedLocale = c.req.header("x-referral-locale")
+    const locale = requestedLocale === "ru" || requestedLocale === "ro" ? requestedLocale : null
+    await recordReferralClickForResolvedLink(result, locale)
+  }
+
+  return c.json({ valid: true, link: serializeReferralLink(result.link) })
 })
 
 export async function listAdminReferralLinks(partnerId: string) {

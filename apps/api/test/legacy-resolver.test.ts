@@ -35,16 +35,17 @@ function productResponse(requestedLocale: "ru" | "ro" = "ro") {
   }
 }
 
-function brandResponse(requestedLocale: "ru" | "ro" = "ro", uri = "chanel", roUri = uri) {
+function brandResponse(requestedLocale: "ru" | "ro" = "ro", uri = "chanel", roUri = uri, route: "brands" | "catalog" = "brands") {
+  const prefix = route === "catalog" ? "catalog" : "brands"
   return {
     contractVersion: 1,
     entity: { type: "brand", id: "77" },
     requestedLocale,
     targets: {
-      ru: { available: true, url: `https://vizaje-nica.com/ru/brands/${uri}`, path: `/ru/brands/${uri}` },
-      ro: { available: true, url: `https://vizaje-nica.com/ro/brands/${roUri}`, path: `/ro/brands/${roUri}` },
+      ru: { available: true, url: `https://vizaje-nica.com/ru/${prefix}/${uri}`, path: `/ru/${prefix}/${uri}` },
+      ro: { available: true, url: `https://vizaje-nica.com/ro/${prefix}/${roUri}`, path: `/ro/${prefix}/${roUri}` },
     },
-    fallback: { locale: requestedLocale, path: `/${requestedLocale}/brands/${requestedLocale === "ro" ? roUri : uri}` },
+    fallback: { locale: requestedLocale, path: `/${requestedLocale}/${prefix}/${requestedLocale === "ro" ? roUri : uri}` },
     resolvedAt: "2026-11-04T08:00:00.000Z",
   }
 }
@@ -140,6 +141,18 @@ describe("Legacy resolver client (M5.1 v1)", () => {
     expect(result.targets.ru.path).toBe("/ru/brands/chanel")
     expect(result.targets.ro.path).toBe("/ro/brands/chanel")
     expect(result.fallback.path).toBe("/ro/brands/chanel")
+  })
+
+  test("accepts shared catalog brand routes in both resolver input and canonical snapshots", async () => {
+    const input = parseResolverSubmission("https://vizaje-nica.com/ro/catalog/anastasia-beverly-hills", "brand", "ro", { allowedHosts, nodeEnv: "production" })
+    const client = makeClient(async (url, init) => {
+      expectSignedRequest(url, init, input)
+      return { status: 200, headers: new Headers(), bodyText: JSON.stringify(brandResponse("ro", "anastasia-beverly-hills", "anastasia-beverly-hills", "catalog")) }
+    })
+    const result = await client.resolve(input)
+    expect(result.targets.ru.path).toBe("/ru/catalog/anastasia-beverly-hills")
+    expect(result.targets.ro.path).toBe("/ro/catalog/anastasia-beverly-hills")
+    expect(result.fallback.path).toBe("/ro/catalog/anastasia-beverly-hills")
   })
 
   test("rejects brand snapshots whose RU and RO URIs disagree", async () => {
