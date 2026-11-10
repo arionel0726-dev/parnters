@@ -54,4 +54,15 @@ test.describe("authentication", () => {
     await page.locator("form button[type=submit]").click()
     await expect(page.getByRole("alert").filter({ hasText: /сброс|недейств|истёк|ошиб/i }).first()).toBeVisible()
   })
+
+  test("keeps Legacy account-link return-to local and rejects external return targets", async ({ page }) => {
+    const ticket = "A".repeat(43)
+    await page.goto(`/link/legacy/authorize?ticket=${ticket}`)
+    await expect(page).toHaveURL(/\/login\?returnTo=/)
+    expect(new URL(page.url()).searchParams.get("returnTo")).toBe(`/link/legacy/authorize?ticket=${ticket}`)
+
+    await login(page, "creator")
+    await page.goto("/login?returnTo=https%3A%2F%2Fevil.example%2Fsession")
+    await expect(page).toHaveURL(/\/dashboard(?:$|\?)/)
+  })
 })

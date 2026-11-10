@@ -10,7 +10,7 @@ type AccountProfile = {
   partner?: { type: string; status: string } | null
 }
 
-export function LoginForm({ locale }: { locale: Locale }) {
+export function LoginForm({ locale, returnTo }: { locale: Locale; returnTo?: string }) {
   const copy = translations[locale]
   const router = useRouter()
   const [email, setEmail] = useState("")
@@ -50,7 +50,7 @@ export function LoginForm({ locale }: { locale: Locale }) {
         method: "POST",
         headers: { "content-type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ email: normalizedEmail, password, callbackURL: "/app" }),
+        body: JSON.stringify({ email: normalizedEmail, password, callbackURL: returnTo ?? "/app" }),
       })
 
       if (!response.ok) {
@@ -80,7 +80,7 @@ export function LoginForm({ locale }: { locale: Locale }) {
         return
       }
 
-      router.replace(profile.partner?.type === "creator" ? "/dashboard" : "/app")
+      router.replace(returnTo ?? (profile.partner?.type === "creator" ? "/dashboard" : "/app"))
       router.refresh()
     } catch {
       setError(copy.login.serviceError)

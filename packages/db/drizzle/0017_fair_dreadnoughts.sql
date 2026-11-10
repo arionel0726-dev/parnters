@@ -1,0 +1,1 @@
+ALTER TABLE "legacy_account_link_initiations" ALTER COLUMN "legacy_client_id" DROP NOT NULL;

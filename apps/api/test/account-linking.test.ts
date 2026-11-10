@@ -8,6 +8,7 @@ import {
   authSessions,
   getDb,
   legacyAccountLinkCodes,
+  legacyAccountLinkInitiations,
   legacyAccountLinkNonces,
   partnerAccounts,
   partners,
@@ -16,7 +17,7 @@ import {
 import { app } from "../src/index"
 import { buildAccountLinkCanonicalString } from "../src/modules/account-linking/service-auth"
 
-const redirectUri = "https://dev.vizaje-nica.com/account-link/callback"
+const redirectUri = "https://dev.vizaje-nica.com/account/creator-link/callback"
 const keyId = "legacy-to-partners-test-2026-11"
 const secret = randomBytes(32)
 const secretBase64Url = secret.toString("base64url")
@@ -24,6 +25,7 @@ const password = "M5.3B.1B-account-linking-test-2026"
 const createdUserIds: string[] = []
 const createdPartnerIds: string[] = []
 const createdCodeHashes: string[] = []
+const createdTicketHashes: string[] = []
 
 process.env.LEGACY_ACCOUNT_LINK_REDIRECT_URI = redirectUri
 process.env.LEGACY_TO_PARTNERS_HMAC_KEYS = JSON.stringify([{ keyId, secret: secretBase64Url, active: true }])
@@ -98,20 +100,8 @@ async function createFixture(input: {
   return { userId, partnerId: withPartner ? partnerId : null, cookie: sessionCookie(login) }
 }
 
-async function authorize(cookie: string, clientId = "12345", uri = redirectUri, confirmed = true) {
-  const verifier = randomBytes(32).toString("base64url")
-  const challenge = createHash("sha256").update(verifier).digest("base64url")
-  const response = await request("/v1/partner/account-linking/authorize", {
-    method: "POST",
-    headers: { origin: "http://localhost:3000", cookie, "content-type": "application/json" },
-    body: JSON.stringify({ legacyClientId: clientId, redirectUri: uri, codeChallenge: challenge, confirmed }),
-  })
-  const body = await response.json() as { code?: string; expiresAt?: string }
-  if (body.code) createdCodeHashes.push(createHash("sha256").update(body.code).digest("hex"))
-  return { response, body, verifier }
-}
-
-function signedExchange(
+function signedLegacy(
+  path: "/initiate" | "/exchange" | "/partner-status",
   body: Record<string, string>,
   options: { timestamp?: number; nonce?: string; signature?: string; requestKeyId?: string } = {},
 ) {
@@ -122,13 +112,13 @@ function signedExchange(
   const canonical = buildAccountLinkCanonicalString({
     keyId: requestKeyId,
     method: "POST",
-    pathAndQuery: "/v1/internal/account-linking/exchange",
+    pathAndQuery: `/v1/internal/account-linking${path}`,
     timestamp,
     nonce,
     rawBody,
   })
   const signature = options.signature ?? createHmac("sha256", secret).update(canonical, "utf8").digest("hex")
-  return request("/v1/internal/account-linking/exchange", {
+  return request(`/v1/internal/account-linking${path}`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -139,6 +129,45 @@ function signedExchange(
     },
     body: rawBody,
   })
+}
+
+async function initiate(clientId = "12345", state = randomBytes(32).toString("base64url"), uri = redirectUri) {
+  const verifier = randomBytes(32).toString("base64url")
+  const challenge = createHash("sha256").update(verifier).digest("base64url")
+  const response = await signedLegacy("/initiate", { legacyClientId: clientId, redirectUri: uri, codeChallenge: challenge, state })
+  const body = await response.json() as { ticket?: string; authorizeUrl?: string; expiresAt?: string }
+  if (body.ticket) createdTicketHashes.push(createHash("sha256").update(body.ticket).digest("hex"))
+  return { response, body, verifier, state, challenge }
+}
+
+function inspect(cookie: string, ticket: string) {
+  return request("/v1/partner/account-linking/inspect", {
+    method: "POST",
+    headers: { origin: "http://localhost:3000", cookie, "content-type": "application/json" },
+    body: JSON.stringify({ ticket }),
+  })
+}
+
+async function confirm(cookie: string, ticket: string, confirmed = true) {
+  const response = await request("/v1/partner/account-linking/authorize", {
+    method: "POST",
+    headers: { origin: "http://localhost:3000", cookie, "content-type": "application/json" },
+    body: JSON.stringify({ ticket, confirmed }),
+  })
+  const body = await response.json() as { callbackUrl?: string; expiresAt?: string }
+  if (body.callbackUrl) {
+    const callback = new URL(body.callbackUrl)
+    const code = callback.searchParams.get("code")
+    if (code) createdCodeHashes.push(createHash("sha256").update(code).digest("hex"))
+  }
+  return { response, body }
+}
+
+function signedExchange(
+  body: Record<string, string>,
+  options: { timestamp?: number; nonce?: string; signature?: string; requestKeyId?: string } = {},
+) {
+  return signedLegacy("/exchange", body, options)
 }
 
 async function cleanFixtureData() {
@@ -155,6 +184,9 @@ async function cleanFixtureData() {
   if (createdCodeHashes.length) {
     await db.delete(legacyAccountLinkCodes).where(inArray(legacyAccountLinkCodes.codeHash, createdCodeHashes))
   }
+  if (createdTicketHashes.length) {
+    await db.delete(legacyAccountLinkInitiations).where(inArray(legacyAccountLinkInitiations.ticketHash, createdTicketHashes))
+  }
   await db.delete(legacyAccountLinkNonces).where(eq(legacyAccountLinkNonces.keyId, keyId))
 }
 
@@ -165,101 +197,131 @@ beforeAll(async () => {
 afterAll(cleanFixtureData)
 
 describe("Legacy account linking", () => {
-  test("requires authentication, trusted Origin, explicit confirmation and an active creator", async () => {
-    const unauthenticated = await request("/v1/partner/account-linking/authorize", { method: "POST" })
+  test("requires authentication, trusted Origin and an active creator", async () => {
+    const unauthenticated = await request("/v1/partner/account-linking/inspect", { method: "POST" })
     expect(unauthenticated.status).toBe(401)
 
     const fixture = await createFixture({})
-    const missingOrigin = await request("/v1/partner/account-linking/authorize", {
+    const initiated = await initiate("client-active")
+    expect(initiated.response.status).toBe(201)
+    expect(initiated.body.authorizeUrl).toContain("/link/legacy/authorize?ticket=")
+    expect(initiated.body.authorizeUrl).not.toContain("client-active")
+
+    const missingOrigin = await request("/v1/partner/account-linking/inspect", {
       method: "POST",
       headers: { cookie: fixture.cookie, "content-type": "application/json" },
-      body: JSON.stringify({ legacyClientId: "1", redirectUri, codeChallenge: randomBytes(32).toString("base64url"), confirmed: true }),
+      body: JSON.stringify({ ticket: initiated.body.ticket }),
     })
     expect(missingOrigin.status).toBe(403)
 
-    const issued = await authorize(fixture.cookie)
-    expect(issued.response.status).toBe(201)
-    const suspended = await authorize((await createFixture({ status: "suspended" })).cookie)
-    expect(suspended.response.status).toBe(403)
-    const banned = await authorize((await createFixture({ status: "banned" })).cookie)
-    expect(banned.response.status).toBe(403)
-
+    expect((await inspect(fixture.cookie, initiated.body.ticket!)).status).toBe(200)
+    const suspended = await createFixture({ status: "suspended" })
+    expect((await inspect(suspended.cookie, initiated.body.ticket!)).status).toBe(403)
+    const banned = await createFixture({ status: "banned" })
+    expect((await inspect(banned.cookie, initiated.body.ticket!)).status).toBe(403)
     const regular = await createFixture({ withPartner: false })
-    const regularResult = await authorize(regular.cookie)
-    expect(regularResult.response.status).toBe(403)
+    expect((await inspect(regular.cookie, initiated.body.ticket!)).status).toBe(403)
   })
 
-  test("rejects an unapproved redirect URI and invalid confirmation", async () => {
+  test("uses a server-created initiation ticket and rejects browser field injection", async () => {
     const fixture = await createFixture({})
-    const wrongRedirect = await authorize(fixture.cookie, "1", "https://evil.example/callback")
+    const initiated = await initiate("client-41")
+    expect(initiated.response.status).toBe(201)
+
+    const invalidConfirmation = await request("/v1/partner/account-linking/authorize", {
+      method: "POST",
+      headers: { origin: "http://localhost:3000", cookie: fixture.cookie, "content-type": "application/json" },
+      body: JSON.stringify({ ticket: initiated.body.ticket }),
+    })
+    expect(invalidConfirmation.status).toBe(400)
+
+    const tampered = await request("/v1/partner/account-linking/authorize", {
+      method: "POST",
+      headers: { origin: "http://localhost:3000", cookie: fixture.cookie, "content-type": "application/json" },
+      body: JSON.stringify({ ticket: initiated.body.ticket, confirmed: true, legacyClientId: "other-client" }),
+    })
+    expect(tampered.status).toBe(400)
+
+    const confirmed = await confirm(fixture.cookie, initiated.body.ticket!)
+    expect(confirmed.response.status).toBe(200)
+    const callback = new URL(confirmed.body.callbackUrl!)
+    expect(callback.origin + callback.pathname).toBe(redirectUri)
+    expect(callback.searchParams.get("state")).toBe(initiated.state)
+    expect(callback.searchParams.get("code")).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    const consumedInitiation = await db.select().from(legacyAccountLinkInitiations).where(eq(legacyAccountLinkInitiations.ticketHash, createHash("sha256").update(initiated.body.ticket!).digest("hex"))).limit(1)
+    expect(consumedInitiation[0]?.legacyClientId).toBeNull()
+    expect((await confirm(fixture.cookie, initiated.body.ticket!)).response.status).toBe(400)
+  })
+
+  test("rejects an unapproved callback URI, expired ticket and open redirect", async () => {
+    const wrongRedirect = await initiate("client-wrong-redirect", randomBytes(32).toString("base64url"), "https://evil.example/account/creator-link/callback")
     expect(wrongRedirect.response.status).toBe(400)
 
-    const response = await authorize(fixture.cookie, "1", redirectUri, false)
-    expect(response.response.status).toBe(400)
+    const expired = await initiate("client-expired")
+    const ticketHash = createHash("sha256").update(expired.body.ticket!).digest("hex")
+    await db.update(legacyAccountLinkInitiations).set({ expiresAt: new Date(Date.now() - 1000) }).where(eq(legacyAccountLinkInitiations.ticketHash, ticketHash))
+    const fixture = await createFixture({})
+    expect((await inspect(fixture.cookie, expired.body.ticket!)).status).toBe(400)
   })
 
-  test("exchanges once, invalidates the code and clears the Legacy client ID", async () => {
+  test("exchanges once, preserves state and clears the Legacy client ID", async () => {
     const fixture = await createFixture({})
-    const issued = await authorize(fixture.cookie, "client-42")
-    expect(issued.response.status).toBe(201)
-    expect(issued.body.code).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    const initiated = await initiate("client-42")
+    const confirmed = await confirm(fixture.cookie, initiated.body.ticket!)
+    expect(confirmed.response.status).toBe(200)
+    const callback = new URL(confirmed.body.callbackUrl!)
+    const code = callback.searchParams.get("code")!
 
-    const exchanged = await signedExchange({ code: issued.body.code!, legacyClientId: "client-42", redirectUri, codeVerifier: issued.verifier })
+    const exchanged = await signedExchange({ code, legacyClientId: "client-42", redirectUri, codeVerifier: initiated.verifier })
     expect(exchanged.status).toBe(200)
     expect(await exchanged.json()).toMatchObject({ partnerId: fixture.partnerId, type: "creator", status: "active" })
 
-    const hash = createHash("sha256").update(issued.body.code!).digest("hex")
+    const hash = createHash("sha256").update(code).digest("hex")
     const stored = await db.select().from(legacyAccountLinkCodes).where(eq(legacyAccountLinkCodes.codeHash, hash)).limit(1)
     expect(stored[0]?.consumedAt).toBeTruthy()
     expect(stored[0]?.legacyClientId).toBeNull()
 
-    const reused = await signedExchange({ code: issued.body.code!, legacyClientId: "client-42", redirectUri, codeVerifier: issued.verifier })
+    const reused = await signedExchange({ code, legacyClientId: "client-42", redirectUri, codeVerifier: initiated.verifier })
     expect(reused.status).toBe(400)
   })
 
   test("rejects a wrong PKCE verifier, expired code and mismatched client", async () => {
     const fixture = await createFixture({})
-    const wrongVerifier = await authorize(fixture.cookie, "client-43")
-    const wrongPkce = await signedExchange({ code: wrongVerifier.body.code!, legacyClientId: "client-43", redirectUri, codeVerifier: randomBytes(32).toString("base64url") })
+    const wrongVerifier = await initiate("client-43")
+    const confirmed = await confirm(fixture.cookie, wrongVerifier.body.ticket!)
+    const code = new URL(confirmed.body.callbackUrl!).searchParams.get("code")!
+    const wrongPkce = await signedExchange({ code, legacyClientId: "client-43", redirectUri, codeVerifier: randomBytes(32).toString("base64url") })
     expect(wrongPkce.status).toBe(400)
 
-    const wrongClient = await signedExchange({ code: wrongVerifier.body.code!, legacyClientId: "client-other", redirectUri, codeVerifier: wrongVerifier.verifier })
+    const wrongClient = await signedExchange({ code, legacyClientId: "client-other", redirectUri, codeVerifier: wrongVerifier.verifier })
     expect(wrongClient.status).toBe(400)
 
-    const expired = await authorize(fixture.cookie, "client-44")
-    const expiredHash = createHash("sha256").update(expired.body.code!).digest("hex")
+    const expired = await initiate("client-44")
+    const expiredConfirmed = await confirm(fixture.cookie, expired.body.ticket!)
+    const expiredCode = new URL(expiredConfirmed.body.callbackUrl!).searchParams.get("code")!
+    const expiredHash = createHash("sha256").update(expiredCode).digest("hex")
     await db.update(legacyAccountLinkCodes).set({ expiresAt: new Date(Date.now() - 1000) }).where(eq(legacyAccountLinkCodes.codeHash, expiredHash))
-    const expiredExchange = await signedExchange({ code: expired.body.code!, legacyClientId: "client-44", redirectUri, codeVerifier: expired.verifier })
+    const expiredExchange = await signedExchange({ code: expiredCode, legacyClientId: "client-44", redirectUri, codeVerifier: expired.verifier })
     expect(expiredExchange.status).toBe(400)
   })
 
-  test("does not exchange a code after the creator is suspended or banned", async () => {
+  test("does not confirm or exchange after the creator is suspended or banned", async () => {
     for (const status of ["suspended", "banned"] as const) {
       const fixture = await createFixture({})
-      const issued = await authorize(fixture.cookie, `client-${status}`)
+      const initiated = await initiate(`client-${status}`)
       await db.update(partners).set({ status }).where(eq(partners.id, fixture.partnerId!))
-
-      const response = await signedExchange({
-        code: issued.body.code!,
-        legacyClientId: `client-${status}`,
-        redirectUri,
-        codeVerifier: issued.verifier,
-      })
-      expect(response.status).toBe(403)
-
-      const hash = createHash("sha256").update(issued.body.code!).digest("hex")
-      const stored = await db.select().from(legacyAccountLinkCodes).where(eq(legacyAccountLinkCodes.codeHash, hash)).limit(1)
-      expect(stored[0]?.consumedAt).toBeTruthy()
-      expect(stored[0]?.legacyClientId).toBeNull()
+      expect((await inspect(fixture.cookie, initiated.body.ticket!)).status).toBe(403)
     }
   })
 
   test("allows only one of two concurrent exchanges", async () => {
     const fixture = await createFixture({})
-    const issued = await authorize(fixture.cookie, "client-concurrent")
+    const initiated = await initiate("client-concurrent")
+    const confirmed = await confirm(fixture.cookie, initiated.body.ticket!)
+    const code = new URL(confirmed.body.callbackUrl!).searchParams.get("code")!
     const responses = await Promise.all([
-      signedExchange({ code: issued.body.code!, legacyClientId: "client-concurrent", redirectUri, codeVerifier: issued.verifier }),
-      signedExchange({ code: issued.body.code!, legacyClientId: "client-concurrent", redirectUri, codeVerifier: issued.verifier }),
+      signedExchange({ code, legacyClientId: "client-concurrent", redirectUri, codeVerifier: initiated.verifier }),
+      signedExchange({ code, legacyClientId: "client-concurrent", redirectUri, codeVerifier: initiated.verifier }),
     ])
     expect(responses.filter((response) => response.status === 200)).toHaveLength(1)
     expect(responses.filter((response) => response.status === 400)).toHaveLength(1)
@@ -284,12 +346,7 @@ describe("Legacy account linking", () => {
 
   test("returns only non-PII current partner status to Legacy", async () => {
     const fixture = await createFixture({ status: "banned" })
-    const body = JSON.stringify({ partnerId: fixture.partnerId })
-    const timestamp = String(Math.floor(Date.now() / 1000))
-    const nonce = randomBytes(16).toString("base64url")
-    const canonical = buildAccountLinkCanonicalString({ keyId, method: "POST", pathAndQuery: "/v1/internal/account-linking/partner-status", timestamp, nonce, rawBody: body })
-    const signature = createHmac("sha256", secret).update(canonical).digest("hex")
-    const response = await request("/v1/internal/account-linking/partner-status", { method: "POST", headers: { "content-type": "application/json", "x-vp-key-id": keyId, "x-vp-timestamp": timestamp, "x-vp-nonce": nonce, "x-vp-signature": signature }, body })
+    const response = await signedLegacy("/partner-status", { partnerId: fixture.partnerId! })
     expect(response.status).toBe(200)
     const result = await response.json() as Record<string, unknown>
     expect(result).toEqual({ partnerId: fixture.partnerId, creatorId: expect.any(String), type: "creator", status: "banned" })

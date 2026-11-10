@@ -15,6 +15,15 @@ const nextConfig: NextConfig = {
 			ignore: [/\/activate(?:\?.*)?$/]
 		}
 	},
+	async headers() {
+		return [{
+			source: '/link/legacy/authorize',
+			headers: [
+				{ key: 'Cache-Control', value: 'no-store' },
+				{ key: 'Referrer-Policy', value: 'no-referrer' },
+			],
+		}]
+	},
 	turbopack: {
 		root: path.resolve(__dirname, '../..')
 	}

@@ -474,6 +474,26 @@ export const legacyAccountLinkCodes = pgTable(
   ],
 )
 
+export const legacyAccountLinkInitiations = pgTable(
+  "legacy_account_link_initiations",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    ticketHash: text("ticket_hash").notNull(),
+    legacyClientId: text("legacy_client_id"),
+    redirectUri: text("redirect_uri").notNull(),
+    pkceChallenge: text("pkce_challenge").notNull(),
+    state: text("state").notNull(),
+    stateHash: text("state_hash").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+  },
+  (table) => [
+    uniqueIndex("legacy_account_link_initiations_ticket_unique").on(table.ticketHash),
+    index("legacy_account_link_initiations_expiry_idx").on(table.expiresAt),
+  ],
+)
+
 export const legacyAccountLinkNonces = pgTable(
   "legacy_account_link_nonces",
   {
@@ -582,6 +602,8 @@ export type Notification = typeof notifications.$inferSelect
 export type NewNotification = typeof notifications.$inferInsert
 export type LegacyAccountLinkCode = typeof legacyAccountLinkCodes.$inferSelect
 export type NewLegacyAccountLinkCode = typeof legacyAccountLinkCodes.$inferInsert
+export type LegacyAccountLinkInitiation = typeof legacyAccountLinkInitiations.$inferSelect
+export type NewLegacyAccountLinkInitiation = typeof legacyAccountLinkInitiations.$inferInsert
 export type LegacyAccountLinkNonce = typeof legacyAccountLinkNonces.$inferSelect
 export type NewLegacyAccountLinkNonce = typeof legacyAccountLinkNonces.$inferInsert
 export type AuthSession = typeof authSessions.$inferSelect
