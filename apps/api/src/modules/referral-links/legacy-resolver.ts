@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomBytes } from "node:crypto"
 import { Agent, fetch as undiciFetch } from "undici"
 import { z } from "zod"
+import { logger } from "../../logger"
 
 const resolverPath = "/internal/v1/referrals/resolve-target"
 const maximumBodyBytes = 16 * 1024
@@ -9,6 +10,7 @@ const connectTimeoutMs = 500
 const maximumAttempts = 2
 const retryDelayMs = 150
 const callerDeadlineMs = 5_000
+const resolverUserAgent = "VizajePartners-LegacyResolver/1.0"
 
 const localeTargetSchema = z.discriminatedUnion("available", [
   z.object({ available: z.literal(true), url: z.string().url(), path: z.string().min(1) }).strict(),
@@ -69,19 +71,23 @@ export class LegacyResolverConfigurationError extends Error {
 
 export class LegacyResolverUnavailableError extends Error {
   readonly code = "LEGACY_TEMPORARILY_UNAVAILABLE"
+  readonly diagnostics?: LegacyResolverDiagnostics
 
-  constructor() {
+  constructor(diagnostics?: LegacyResolverDiagnostics) {
     super("Legacy resolver is temporarily unavailable.")
     this.name = "LegacyResolverUnavailableError"
+    this.diagnostics = diagnostics
   }
 }
 
 export class LegacyResolverInvalidResponseError extends Error {
   readonly code = "LEGACY_RESOLVER_INVALID_RESPONSE"
+  readonly httpStatus?: number
 
-  constructor() {
+  constructor(httpStatus?: number) {
     super("Legacy resolver returned an invalid response.")
     this.name = "LegacyResolverInvalidResponseError"
+    this.httpStatus = httpStatus
   }
 }
 
@@ -94,6 +100,16 @@ export class LegacyResolverRejectedError extends Error {
 
 type ResolverKey = { keyId: string; secret: Buffer; active: boolean }
 type ResolverHttpResponse = { status: number; headers: { get(name: string): string | null }; bodyText: string }
+type ResolverErrorObject = { name?: unknown; code?: unknown; cause?: unknown }
+export type LegacyResolverDiagnostics = {
+  category: "timeout" | "network" | "connection" | "http" | "unknown"
+  attempt: number
+  errorName?: string
+  errorCode?: string
+  causeName?: string
+  causeCode?: string
+  httpStatus?: number
+}
 export type ResolverTransport = (
   url: string,
   init: { method: "POST"; headers: Record<string, string>; body: string; signal: AbortSignal },
@@ -176,19 +192,24 @@ function hasLocalePrefix(path: string, locale: ResolverLocale) {
   return path === `/${locale}` || path.startsWith(`/${locale}/`)
 }
 
+function catalogPrefix(locale: ResolverLocale) {
+  return locale === "ru" ? "katalog" : "catalog"
+}
+
 function validateCanonicalPath(path: string, locale: ResolverLocale, type: ResolverEntityType) {
   if (!path.startsWith("/") || path.startsWith("//") || path.includes("\\") || path.includes("?") || path.includes("#") || /%2f|%5c/i.test(path)) return false
   if (/(?:^|\/)\.{1,2}(?:\/|$)/.test(path) || /%2e/i.test(path)) return false
   if (type === "homepage") return path === "/" || path === `/${locale}` || path === `/${locale}/`
-  if (type === "brand") return new RegExp(`^/${locale}/(?:brands?/[^/]+|(?:catalog|katalog)/[^/]+)/?$`).test(path)
   if (!hasLocalePrefix(path, locale)) return false
   const localized = path.slice(locale.length + 2)
-  if (type === "category") return /^(?:(?:catalog|katalog)\/)?categories?\/[^/]+(?:\/[^/]+)*\/?$/.test(localized)
-    || /^(?:catalog|katalog)\/[^/]+(?:\/[^/]+)*\/?$/.test(localized)
-  if (type === "product") {
-    return /^(?:(?:(?:catalog|katalog)\/)?products?\/[^/]+(?:\/[^/]+)*|(?:catalog|katalog)\/[^/]+\/[^/]+(?:\/[^/]+)*)\/?$/.test(localized)
-  }
+  const prefix = catalogPrefix(locale)
+  if (type === "brand" || type === "category") return new RegExp(`^${prefix}/[^/]+/?$`).test(localized)
+  if (type === "product") return new RegExp(`^${prefix}/[^/]+/[^/]+/?$`).test(localized)
   return false
+}
+
+function catalogEntityUri(path: string, locale: ResolverLocale) {
+  return path.match(new RegExp(`^/${locale}/${catalogPrefix(locale)}/([^/]+)/?$`))?.[1] ?? null
 }
 
 function validateResponseSemantics(
@@ -209,8 +230,8 @@ function validateResponseSemantics(
   // Legacy uses one shared brand URI, while the locale prefix differs. Reject
   // inconsistent snapshots rather than persisting two unrelated brand pages.
   if (input.expectedType === "brand" && value.targets.ru.available && value.targets.ro.available) {
-    const ruUri = value.targets.ru.path.match(/^\/ru\/(?:brands?|(?:catalog|katalog))\/([^/]+)\/?$/)?.[1]
-    const roUri = value.targets.ro.path.match(/^\/ro\/(?:brands?|(?:catalog|katalog))\/([^/]+)\/?$/)?.[1]
+    const ruUri = catalogEntityUri(value.targets.ru.path, "ru")
+    const roUri = catalogEntityUri(value.targets.ro.path, "ro")
     if (!ruUri || !roUri || ruUri !== roUri) return false
   }
 
@@ -236,6 +257,39 @@ function validateResponseSemantics(
 function rawPathIsSafe(path: string) {
   return path.startsWith("/") && !path.startsWith("//") && !path.includes("\\") &&
     !/%(?:2f|5c|2e)/i.test(path) && !/(?:^|\/)\.{1,2}(?:\/|$)/.test(path)
+}
+
+function errorObject(value: unknown): ResolverErrorObject {
+  return value !== null && typeof value === "object" ? value as ResolverErrorObject : {}
+}
+
+function stringField(value: unknown) {
+  return typeof value === "string" && value.length > 0 ? value : undefined
+}
+
+function classifyTransportError(error: unknown, attempt: number): LegacyResolverDiagnostics {
+  const current = errorObject(error)
+  const cause = errorObject(current.cause)
+  const errorName = stringField(current.name)
+  const errorCode = stringField(current.code)
+  const causeName = stringField(cause.name)
+  const causeCode = stringField(cause.code)
+  const tokens = [errorName, errorCode, causeName, causeCode].filter(Boolean).join(" ").toUpperCase()
+  const category = /TIMEOUT|TIMED_OUT|ABORT/.test(tokens)
+    ? "timeout"
+    : /ECONNRESET|ECONNREFUSED|EPIPE|SOCKET|CONNECT/.test(tokens)
+      ? "connection"
+      : /ENOTFOUND|EAI_AGAIN|NETWORK|FETCH_FAILED/.test(tokens)
+        ? "network"
+        : "unknown"
+  return {
+    category,
+    attempt,
+    ...(errorName ? { errorName } : {}),
+    ...(errorCode ? { errorCode } : {}),
+    ...(causeName ? { causeName } : {}),
+    ...(causeCode ? { causeCode } : {}),
+  }
 }
 
 /** Locally validates creator input without deriving or guessing the Legacy entity ID. */
@@ -293,11 +347,13 @@ export function parseResolverSubmission(
 }
 
 function validateOutgoingTarget(input: ResolveTargetInput) {
-  if (
-    !rawPathIsSafe(input.target) ||
-    !validateCanonicalPath(input.target, input.requestedLocale, input.expectedType) &&
-      !(input.expectedType === "brand" && /^\/(?:ru|ro)\/(?:brands?|(?:catalog|katalog))\/[^/]+\/?$/.test(input.target))
-  ) throw new LegacyResolverRejectedError("INVALID_TARGET", 400, false)
+  const targetLocale = input.target.match(/^\/(ru|ro)(?:\/|$)/)?.[1] as ResolverLocale | undefined
+  if (targetLocale && targetLocale !== input.requestedLocale && input.expectedType !== "brand") {
+    throw new LegacyResolverRejectedError("LOCALE_MISMATCH", 409, false)
+  }
+  if (!rawPathIsSafe(input.target) || !validateCanonicalPath(input.target, targetLocale ?? input.requestedLocale, input.expectedType)) {
+    throw new LegacyResolverRejectedError("INVALID_TARGET", 400, false)
+  }
   // The client deliberately sends only a validated relative path. Legacy owns the
   // canonical origin and entity lookup; a client-supplied host cannot redirect it.
 }
@@ -328,7 +384,7 @@ async function defaultTransport(
         size += value.byteLength
         if (size > maximumBodyBytes) {
           await reader.cancel()
-          throw new LegacyResolverInvalidResponseError()
+          throw new LegacyResolverInvalidResponseError(response.status)
         }
         chunks.push(value)
       }
@@ -343,11 +399,15 @@ async function defaultTransport(
     try {
       bodyText = new TextDecoder("utf-8", { fatal: true }).decode(bytes)
     } catch {
-      throw new LegacyResolverInvalidResponseError()
+      throw new LegacyResolverInvalidResponseError(response.status)
     }
     return { status: response.status, headers: response.headers, bodyText }
   } finally {
-    await dispatcher.close().catch(() => undefined)
+    // Bun 1.3.14 exposes the Undici Agent dispatcher surface without the
+    // Node-only close() method. Keep cleanup when running under Node, but do
+    // not turn a successful HTTP response into a transport failure in Bun.
+    const close = (dispatcher as unknown as { close?: () => Promise<void> }).close
+    if (typeof close === "function") await close.call(dispatcher).catch(() => undefined)
   }
 }
 
@@ -362,15 +422,15 @@ function isRetryableStatus(status: number) {
 }
 
 function parseErrorResponse(response: ResolverHttpResponse): { code: string; retryable: boolean } {
-  if (Buffer.byteLength(response.bodyText, "utf8") > maximumBodyBytes) throw new LegacyResolverInvalidResponseError()
+  if (Buffer.byteLength(response.bodyText, "utf8") > maximumBodyBytes) throw new LegacyResolverInvalidResponseError(response.status)
   let parsed: unknown
   try {
     parsed = JSON.parse(response.bodyText)
   } catch {
-    throw new LegacyResolverInvalidResponseError()
+    throw new LegacyResolverInvalidResponseError(response.status)
   }
   const result = resolverErrorSchema.safeParse(parsed)
-  if (!result.success) throw new LegacyResolverInvalidResponseError()
+  if (!result.success) throw new LegacyResolverInvalidResponseError(response.status)
   return { code: result.data.error.code, retryable: result.data.error.retryable }
 }
 
@@ -415,6 +475,7 @@ export function createLegacyResolverClient(options: LegacyResolverClientOptions)
         })
         const headers = {
           "content-type": "application/json; charset=utf-8",
+          "user-agent": resolverUserAgent,
           "x-vp-key-id": key.keyId,
           "x-vp-timestamp": timestamp,
           "x-vp-nonce": requestNonce,
@@ -430,30 +491,47 @@ export function createLegacyResolverClient(options: LegacyResolverClientOptions)
             signal: AbortSignal.timeout(attemptMs),
           }, { connectTimeoutMs, totalTimeoutMs: attemptMs })
         } catch (error) {
-          if (error instanceof LegacyResolverInvalidResponseError) throw error
-          if (attempt === maximumAttempts || now() >= deadline) throw new LegacyResolverUnavailableError()
+          if (error instanceof LegacyResolverInvalidResponseError) {
+            logger.warn({
+              diagnostics: {
+                category: "http",
+                attempt,
+                ...(typeof error.httpStatus === "number" ? { httpStatus: error.httpStatus } : {}),
+              },
+            }, "legacy resolver returned an invalid response")
+            throw error
+          }
+          const diagnostics = classifyTransportError(error, attempt)
+          logger.warn({ diagnostics }, "legacy resolver transport attempt failed")
+          if (attempt === maximumAttempts || now() >= deadline) throw new LegacyResolverUnavailableError(diagnostics)
           const delay = Math.min(retryDelayMs, Math.max(0, deadline - now()))
           await sleep(delay)
           continue
         }
 
         if (response.status === 200) {
-          if (Buffer.byteLength(response.bodyText, "utf8") > maximumBodyBytes) throw new LegacyResolverInvalidResponseError()
+          if (Buffer.byteLength(response.bodyText, "utf8") > maximumBodyBytes) throw new LegacyResolverInvalidResponseError(response.status)
           let parsed: unknown
           try {
             parsed = JSON.parse(response.bodyText)
           } catch {
-            throw new LegacyResolverInvalidResponseError()
+            throw new LegacyResolverInvalidResponseError(response.status)
           }
           const result = resolveTargetResponseSchema.safeParse(parsed)
-          if (!result.success || !validateResponseSemantics(result.data, input, allowedHosts)) throw new LegacyResolverInvalidResponseError()
+          if (!result.success || !validateResponseSemantics(result.data, input, allowedHosts)) throw new LegacyResolverInvalidResponseError(response.status)
           return result.data
         }
 
         if (isRetryableStatus(response.status)) {
           const error = parseErrorResponse(response)
           if (!error.retryable) throw new LegacyResolverRejectedError(error.code, response.status, false)
-          if (attempt === maximumAttempts || now() >= deadline) throw new LegacyResolverUnavailableError()
+          const diagnostics: LegacyResolverDiagnostics = {
+            category: "http",
+            attempt,
+            httpStatus: response.status,
+            errorCode: error.code,
+          }
+          if (attempt === maximumAttempts || now() >= deadline) throw new LegacyResolverUnavailableError(diagnostics)
           await sleep(Math.min(response.status === 429 ? retryAfterMs(response.headers) : retryDelayMs, Math.max(0, deadline - now())))
           continue
         }

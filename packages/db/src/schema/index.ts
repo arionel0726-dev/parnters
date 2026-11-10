@@ -452,6 +452,43 @@ export const notifications = pgTable(
   ],
 )
 
+export const legacyAccountLinkCodes = pgTable(
+  "legacy_account_link_codes",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    codeHash: text("code_hash").notNull(),
+    partnerId: uuid("partner_id")
+      .notNull()
+      .references(() => partners.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    legacyClientId: text("legacy_client_id"),
+    redirectUri: text("redirect_uri").notNull(),
+    pkceChallenge: text("pkce_challenge").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+  },
+  (table) => [
+    uniqueIndex("legacy_account_link_codes_hash_unique").on(table.codeHash),
+    index("legacy_account_link_codes_partner_idx").on(table.partnerId, table.createdAt),
+    index("legacy_account_link_codes_expiry_idx").on(table.expiresAt),
+  ],
+)
+
+export const legacyAccountLinkNonces = pgTable(
+  "legacy_account_link_nonces",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    keyId: text("key_id").notNull(),
+    nonce: text("nonce").notNull(),
+    receivedAt: timestamp("received_at", { withTimezone: true }).defaultNow().notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("legacy_account_link_nonces_key_nonce_unique").on(table.keyId, table.nonce),
+    index("legacy_account_link_nonces_expiry_idx").on(table.expiresAt),
+  ],
+)
+
 export const authSessions = pgTable(
   "sessions",
   {
@@ -543,6 +580,10 @@ export type AuditLog = typeof auditLogs.$inferSelect
 export type NewAuditLog = typeof auditLogs.$inferInsert
 export type Notification = typeof notifications.$inferSelect
 export type NewNotification = typeof notifications.$inferInsert
+export type LegacyAccountLinkCode = typeof legacyAccountLinkCodes.$inferSelect
+export type NewLegacyAccountLinkCode = typeof legacyAccountLinkCodes.$inferInsert
+export type LegacyAccountLinkNonce = typeof legacyAccountLinkNonces.$inferSelect
+export type NewLegacyAccountLinkNonce = typeof legacyAccountLinkNonces.$inferInsert
 export type AuthSession = typeof authSessions.$inferSelect
 export type AuthAccount = typeof authAccounts.$inferSelect
 export type AuthVerification = typeof authVerifications.$inferSelect

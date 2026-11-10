@@ -26,6 +26,9 @@ const envSchema = z.object({
   AUDIT_FINANCIAL_RETENTION_DAYS: z.coerce.number().int().positive().default(2555),
   LEGACY_INTERNAL_BASE_URL: z.preprocess((value) => value === "" ? undefined : value, z.string().url().optional()),
   LEGACY_RESOLVER_HMAC_KEYS: z.preprocess((value) => value === "" ? undefined : value, z.string().optional()),
+  // Separate Legacy -> Partners key ring. Never reuse the Partners -> Legacy resolver keys.
+  LEGACY_TO_PARTNERS_HMAC_KEYS: z.preprocess((value) => value === "" ? undefined : value, z.string().optional()),
+  LEGACY_ACCOUNT_LINK_REDIRECT_URI: z.preprocess((value) => value === "" ? undefined : value, z.string().url().optional()),
 })
 
 export function getApiEnv() {
@@ -50,6 +53,8 @@ export function getApiEnv() {
     AUDIT_FINANCIAL_RETENTION_DAYS: process.env.AUDIT_FINANCIAL_RETENTION_DAYS,
     LEGACY_INTERNAL_BASE_URL: process.env.LEGACY_INTERNAL_BASE_URL,
     LEGACY_RESOLVER_HMAC_KEYS: process.env.LEGACY_RESOLVER_HMAC_KEYS,
+    LEGACY_TO_PARTNERS_HMAC_KEYS: process.env.LEGACY_TO_PARTNERS_HMAC_KEYS,
+    LEGACY_ACCOUNT_LINK_REDIRECT_URI: process.env.LEGACY_ACCOUNT_LINK_REDIRECT_URI,
   })
 
   return {

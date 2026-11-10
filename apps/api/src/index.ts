@@ -15,6 +15,7 @@ import { adminFinanceRoutes, creatorFinanceRoutes } from './modules/creator-fina
 import { internalReferralOrderRoutes } from './modules/referral-orders/routes'
 import { adminEmailDeliveryRoutes } from './modules/email-deliveries/routes'
 import { notificationRoutes } from './modules/notifications/routes'
+import { creatorAccountLinkRoutes, legacyAccountLinkRoutes } from './modules/account-linking/routes'
 import { requireServiceAuth } from './auth/middleware'
 import { rateLimit } from './http/rate-limit'
 import { dispatchDueEmailDeliveries } from './modules/applications/email-delivery'
@@ -85,10 +86,16 @@ app.all('/v1/auth/*', async (c) => {
 
 app.route('/v1/applications', applicationRoutes)
 app.route('/v1/notifications', notificationRoutes)
+app.route('/v1/partner/account-linking', creatorAccountLinkRoutes)
 
 app.route('/v1/partner/referral-links', partnerReferralLinkRoutes)
 app.route('/v1/partner', creatorDashboardRoutes)
 app.route('/v1/partner', creatorFinanceRoutes)
+
+// Account linking has its own directional Legacy -> Partners HMAC guard.
+// Register it before the M4 service-token guard so the two auth contracts do
+// not overlap.
+app.route('/v1/internal/account-linking', legacyAccountLinkRoutes)
 
 app.use('/v1/internal/*', requireServiceAuth)
 app.route('/v1/internal/referral-links', internalReferralLinkRoutes)

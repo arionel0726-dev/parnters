@@ -8,6 +8,7 @@ import {
   LegacyResolverRejectedError,
   LegacyResolverUnavailableError,
   parseResolverSubmission,
+  type ResolveTargetResponse,
   type ResolverTransport,
 } from "../src/modules/referral-links/legacy-resolver"
 
@@ -18,7 +19,7 @@ const allowedHosts = ["vizaje-nica.com", "www.vizaje-nica.com"]
 const baseUrl = "https://legacy.internal"
 const signingPath = "/internal/v1/referrals/resolve-target"
 
-function productResponse(requestedLocale: "ru" | "ro" = "ro") {
+function productResponse(requestedLocale: "ru" | "ro" = "ro"): ResolveTargetResponse {
   return {
     contractVersion: 1,
     entity: { type: "product", id: "12345", sourceGuid: "source-guid-1" },
@@ -35,17 +36,30 @@ function productResponse(requestedLocale: "ru" | "ro" = "ro") {
   }
 }
 
-function brandResponse(requestedLocale: "ru" | "ro" = "ro", uri = "chanel", roUri = uri, route: "brands" | "catalog" = "brands") {
-  const prefix = route === "catalog" ? "catalog" : "brands"
+function brandResponse(requestedLocale: "ru" | "ro" = "ro", uri = "chanel", roUri = uri) {
   return {
     contractVersion: 1,
     entity: { type: "brand", id: "77" },
     requestedLocale,
     targets: {
-      ru: { available: true, url: `https://vizaje-nica.com/ru/${prefix}/${uri}`, path: `/ru/${prefix}/${uri}` },
-      ro: { available: true, url: `https://vizaje-nica.com/ro/${prefix}/${roUri}`, path: `/ro/${prefix}/${roUri}` },
+      ru: { available: true, url: `https://vizaje-nica.com/ru/katalog/${uri}`, path: `/ru/katalog/${uri}` },
+      ro: { available: true, url: `https://vizaje-nica.com/ro/catalog/${roUri}`, path: `/ro/catalog/${roUri}` },
     },
-    fallback: { locale: requestedLocale, path: `/${requestedLocale}/${prefix}/${requestedLocale === "ro" ? roUri : uri}` },
+    fallback: { locale: requestedLocale, path: requestedLocale === "ro" ? `/ro/catalog/${roUri}` : `/ru/katalog/${uri}` },
+    resolvedAt: "2026-11-04T08:00:00.000Z",
+  }
+}
+
+function categoryResponse(requestedLocale: "ru" | "ro" = "ro", ruUri = "paletki", roUri = ruUri) {
+  return {
+    contractVersion: 1,
+    entity: { type: "category", id: "42" },
+    requestedLocale,
+    targets: {
+      ru: { available: true, url: `https://vizaje-nica.com/ru/katalog/${ruUri}`, path: `/ru/katalog/${ruUri}` },
+      ro: { available: true, url: `https://vizaje-nica.com/ro/catalog/${roUri}`, path: `/ro/catalog/${roUri}` },
+    },
+    fallback: { locale: requestedLocale, path: requestedLocale === "ro" ? `/ro/catalog/${roUri}` : `/ru/katalog/${ruUri}` },
     resolvedAt: "2026-11-04T08:00:00.000Z",
   }
 }
@@ -73,6 +87,7 @@ function expectSignedRequest(
   expect(url).toBe(`${baseUrl}${signingPath}`)
   expect(init.method).toBe("POST")
   expect(init.headers["content-type"]).toBe("application/json; charset=utf-8")
+  expect(init.headers["user-agent"]).toBe("VizajePartners-LegacyResolver/1.0")
   expect(init.headers["x-vp-key-id"]).toBe(keyId)
   const canonical = buildResolverCanonicalString({
     keyId,
@@ -124,39 +139,112 @@ describe("Legacy resolver client (M5.1 v1)", () => {
     expect(resolved.fallback.path).toBe(path)
   })
 
+  test("uses Bun's Undici dispatcher and sends an explicit resolver User-Agent", async () => {
+    let userAgent: string | null = null
+    const server = Bun.serve({
+      // Bun 1.3.14 rejects port 0, so keep this local-only probe on a fixed test port.
+      port: 39147,
+      fetch(request) {
+        userAgent = request.headers.get("user-agent")
+        return new Response(JSON.stringify(productResponse("ro")), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })
+      },
+    })
+
+    try {
+      const client = createLegacyResolverClient({
+        baseUrl: `http://127.0.0.1:${server.port}`,
+        hmacKeysJson: JSON.stringify([{ keyId, secret, active: true }]),
+        allowedHosts,
+        nodeEnv: "development",
+      })
+      const result = await client.resolve({ target: "/ro/catalog/paletki/39897", expectedType: "product", requestedLocale: "ro" })
+      expect(result.entity).toEqual({ type: "product", id: "12345", sourceGuid: "source-guid-1" })
+      expect(userAgent as unknown).toBe("VizajePartners-LegacyResolver/1.0")
+    } finally {
+      server.stop()
+    }
+  })
+
   test("accepts a shared brand URI with either locale prefix and preserves the requested locale", () => {
-    const fromRu = parseResolverSubmission("https://vizaje-nica.com/ru/brands/chanel", "brand", "ro", { allowedHosts, nodeEnv: "production" })
-    const fromRo = parseResolverSubmission("/ro/brands/chanel", "brand", "ru", { allowedHosts, nodeEnv: "production" })
-    expect(fromRu).toEqual({ target: "/ru/brands/chanel", expectedType: "brand", requestedLocale: "ro" })
-    expect(fromRo).toEqual({ target: "/ro/brands/chanel", expectedType: "brand", requestedLocale: "ru" })
+    const fromRu = parseResolverSubmission("https://vizaje-nica.com/ru/katalog/chanel", "brand", "ro", { allowedHosts, nodeEnv: "production" })
+    const fromRo = parseResolverSubmission("/ro/catalog/chanel", "brand", "ru", { allowedHosts, nodeEnv: "production" })
+    expect(fromRu).toEqual({ target: "/ru/katalog/chanel", expectedType: "brand", requestedLocale: "ro" })
+    expect(fromRo).toEqual({ target: "/ro/catalog/chanel", expectedType: "brand", requestedLocale: "ru" })
   })
 
   test("accepts canonical brand URLs with independent locale prefixes and the same URI", async () => {
-    const input = parseResolverSubmission("https://vizaje-nica.com/ru/brands/chanel", "brand", "ro", { allowedHosts, nodeEnv: "production" })
+    const input = parseResolverSubmission("https://vizaje-nica.com/ru/katalog/chanel", "brand", "ro", { allowedHosts, nodeEnv: "production" })
     const client = makeClient(async (url, init) => {
       expectSignedRequest(url, init, input)
       return { status: 200, headers: new Headers(), bodyText: JSON.stringify(brandResponse("ro")) }
     })
     const result = await client.resolve(input)
-    expect(result.targets.ru.path).toBe("/ru/brands/chanel")
-    expect(result.targets.ro.path).toBe("/ro/brands/chanel")
-    expect(result.fallback.path).toBe("/ro/brands/chanel")
+    expect(result.targets.ru.path).toBe("/ru/katalog/chanel")
+    expect(result.targets.ro.path).toBe("/ro/catalog/chanel")
+    expect(result.fallback.path).toBe("/ro/catalog/chanel")
   })
 
-  test("accepts shared catalog brand routes in both resolver input and canonical snapshots", async () => {
-    const input = parseResolverSubmission("https://vizaje-nica.com/ro/catalog/anastasia-beverly-hills", "brand", "ro", { allowedHosts, nodeEnv: "production" })
+  test.each([
+    ["ru", "https://vizaje-nica.com/ru/katalog/anastasia-beverly-hills"],
+    ["ro", "https://vizaje-nica.com/ro/catalog/anastasia-beverly-hills"],
+  ] as const)("accepts the confirmed %s catalog brand route", async (locale, submittedUrl) => {
+    const input = parseResolverSubmission(submittedUrl, "brand", locale, { allowedHosts, nodeEnv: "production" })
     const client = makeClient(async (url, init) => {
       expectSignedRequest(url, init, input)
-      return { status: 200, headers: new Headers(), bodyText: JSON.stringify(brandResponse("ro", "anastasia-beverly-hills", "anastasia-beverly-hills", "catalog")) }
+      return { status: 200, headers: new Headers(), bodyText: JSON.stringify(brandResponse(locale, "anastasia-beverly-hills")) }
     })
     const result = await client.resolve(input)
-    expect(result.targets.ru.path).toBe("/ru/catalog/anastasia-beverly-hills")
+    expect(result.targets.ru.path).toBe("/ru/katalog/anastasia-beverly-hills")
     expect(result.targets.ro.path).toBe("/ro/catalog/anastasia-beverly-hills")
-    expect(result.fallback.path).toBe("/ro/catalog/anastasia-beverly-hills")
+    expect(result.fallback.path).toBe(locale === "ru" ? "/ru/katalog/anastasia-beverly-hills" : "/ro/catalog/anastasia-beverly-hills")
+  })
+
+  test.each([
+    ["ru", "https://vizaje-nica.com/ru/katalog/paletki"],
+    ["ro", "https://vizaje-nica.com/ro/catalog/paletki"],
+  ] as const)("accepts the confirmed %s catalog category route", async (locale, submittedUrl) => {
+    const input = parseResolverSubmission(submittedUrl, "category", locale, { allowedHosts, nodeEnv: "production" })
+    const client = makeClient(async (url, init) => {
+      expectSignedRequest(url, init, input)
+      return { status: 200, headers: new Headers(), bodyText: JSON.stringify(categoryResponse(locale)) }
+    })
+    const result = await client.resolve(input)
+    expect(result.entity).toEqual({ type: "category", id: "42" })
+    expect(result.targets.ru.path).toBe("/ru/katalog/paletki")
+    expect(result.targets.ro.path).toBe("/ro/catalog/paletki")
+  })
+
+  test("uses the existing RU target when the requested RO translation is unavailable", async () => {
+    const input = parseResolverSubmission("https://vizaje-nica.com/ro/catalog/paletki/39897", "product", "ro", { allowedHosts, nodeEnv: "production" })
+    const resultBody = productResponse("ro")
+    resultBody.targets.ro = { available: false, url: null, path: null }
+    resultBody.fallback = { locale: "ru", path: "/ru/katalog/paletki/39897" }
+    const client = makeClient(async (url, init) => {
+      expectSignedRequest(url, init, input)
+      return { status: 200, headers: new Headers(), bodyText: JSON.stringify(resultBody) }
+    })
+    const result = await client.resolve(input)
+    expect(result.fallback).toEqual({ locale: "ru", path: "/ru/katalog/paletki/39897" })
+  })
+
+  test("keeps a category and brand with the same slug distinct through expectedType", async () => {
+    const input = { target: "/ro/catalog/shared-slug", expectedType: "brand" as const, requestedLocale: "ro" as const }
+    const client = makeClient(async (url, init) => {
+      expectSignedRequest(url, init, input)
+      return {
+        status: 409,
+        headers: new Headers(),
+        bodyText: JSON.stringify({ error: { code: "TYPE_MISMATCH", message: "Expected brand", retryable: false, requestId: "req-type" } }),
+      }
+    })
+    await expect(client.resolve(input)).rejects.toMatchObject({ code: "TYPE_MISMATCH", status: 409, retryable: false })
   })
 
   test("rejects brand snapshots whose RU and RO URIs disagree", async () => {
-    const input = parseResolverSubmission("/ro/brands/chanel", "brand", "ro", { allowedHosts, nodeEnv: "production" })
+    const input = parseResolverSubmission("/ro/catalog/chanel", "brand", "ro", { allowedHosts, nodeEnv: "production" })
     const client = makeClient(async () => ({
       status: 200,
       headers: new Headers(),
@@ -168,10 +256,24 @@ describe("Legacy resolver client (M5.1 v1)", () => {
   test("rejects unsupported, malformed, mismatched, and untrusted destinations locally", () => {
     expect(() => parseResolverSubmission("https://vizaje-nica.com/ro/catalog/x/123?next=/", "product", "ro", { allowedHosts, nodeEnv: "production" })).toThrow(LegacyResolverRejectedError)
     expect(() => parseResolverSubmission("https://evil.example/ro/catalog/x/123", "product", "ro", { allowedHosts, nodeEnv: "production" })).toThrow(LegacyResolverRejectedError)
-    expect(() => parseResolverSubmission("/ru/brands/chanel", "brand", "ro", { allowedHosts, nodeEnv: "production" })).not.toThrow()
+    expect(() => parseResolverSubmission("/ru/katalog/chanel", "brand", "ro", { allowedHosts, nodeEnv: "production" })).not.toThrow()
+    expect(() => parseResolverSubmission("/ru/catalog/chanel", "brand", "ru", { allowedHosts, nodeEnv: "production" })).toThrow(LegacyResolverRejectedError)
+    expect(() => parseResolverSubmission("/ro/katalog/paletki", "category", "ro", { allowedHosts, nodeEnv: "production" })).toThrow(LegacyResolverRejectedError)
     expect(() => parseResolverSubmission("/ru/katalog/x/39897", "product", "ro", { allowedHosts, nodeEnv: "production" })).toThrow(LegacyResolverRejectedError)
-    expect(() => parseResolverSubmission("/ru/brands/chanel", "product", "ru", { allowedHosts, nodeEnv: "production" })).toThrow(LegacyResolverRejectedError)
+    expect(() => parseResolverSubmission("/ru/katalog/chanel", "product", "ru", { allowedHosts, nodeEnv: "production" })).toThrow(LegacyResolverRejectedError)
     expect(() => parseResolverSubmission("//evil.example/ru/brands/x", "brand", "ru", { allowedHosts, nodeEnv: "production" })).toThrow(LegacyResolverRejectedError)
+  })
+
+  test.each([
+    ["untrusted canonical host", "https://evil.example/ru/katalog/paletki/39897", "/ru/katalog/paletki/39897"],
+    ["encoded traversal in canonical path", "https://vizaje-nica.com/ru/katalog/%2e%2e/39897", "/ru/katalog/%2e%2e/39897"],
+    ["wrong locale route prefix", "https://vizaje-nica.com/ru/catalog/paletki/39897", "/ru/catalog/paletki/39897"],
+  ] as const)("rejects a %s", async (_reason, url, path) => {
+    const input = { target: "/ro/catalog/paletki/39897", expectedType: "product" as const, requestedLocale: "ro" as const }
+    const resultBody = productResponse("ro")
+    resultBody.targets.ru = { available: true, url, path }
+    const client = makeClient(async () => ({ status: 200, headers: new Headers(), bodyText: JSON.stringify(resultBody) }))
+    await expect(client.resolve(input)).rejects.toBeInstanceOf(LegacyResolverInvalidResponseError)
   })
 
   test("propagates a Legacy ambiguous-target response as a typed non-retryable rejection", async () => {
@@ -266,6 +368,68 @@ describe("Legacy resolver client (M5.1 v1)", () => {
     await expect(timeoutClient.resolve({ target: "/ro/catalog/paletki/39897", expectedType: "product", requestedLocale: "ro" }))
       .rejects.toBeInstanceOf(LegacyResolverUnavailableError)
     expect(calls).toBe(2)
+  })
+
+  test("classifies network errors without retaining error messages or secrets", async () => {
+    let calls = 0
+    const client = makeClient(async () => {
+      calls += 1
+      const cause = Object.assign(new Error("private cause"), { name: "SocketError", code: "ECONNRESET" })
+      throw Object.assign(new Error("private transport message"), { code: "ECONNRESET", cause })
+    })
+
+    let thrown: unknown
+    try {
+      await client.resolve({ target: "/ro/catalog/paletki/39897", expectedType: "product", requestedLocale: "ro" })
+    } catch (error) {
+      thrown = error
+    }
+
+    expect(thrown).toBeInstanceOf(LegacyResolverUnavailableError)
+    expect((thrown as LegacyResolverUnavailableError).diagnostics).toMatchObject({
+      category: "connection",
+      attempt: 2,
+      errorName: "Error",
+      errorCode: "ECONNRESET",
+      causeName: "SocketError",
+      causeCode: "ECONNRESET",
+    })
+    expect((thrown as Error).message).not.toContain("private")
+    expect(calls).toBe(2)
+  })
+
+  test("keeps a received Cloudflare-like HTTP status on an invalid response", async () => {
+    const client = makeClient(async () => ({
+      status: 403,
+      headers: new Headers({ server: "cloudflare" }),
+      bodyText: "<html>access denied</html>",
+    }))
+
+    await expect(client.resolve({ target: "/ro/catalog/paletki/39897", expectedType: "product", requestedLocale: "ro" }))
+      .rejects.toMatchObject({ code: "LEGACY_RESOLVER_INVALID_RESPONSE", httpStatus: 403 })
+  })
+
+  test("keeps the last retryable HTTP status in unavailable diagnostics", async () => {
+    const client = makeClient(async () => ({
+      status: 503,
+      headers: new Headers(),
+      bodyText: JSON.stringify({ error: { code: "LEGACY_TEMPORARILY_UNAVAILABLE", message: "Unavailable", retryable: true, requestId: "req-http" } }),
+    }), { sleep: async () => undefined })
+
+    let thrown: unknown
+    try {
+      await client.resolve({ target: "/ro/catalog/paletki/39897", expectedType: "product", requestedLocale: "ro" })
+    } catch (error) {
+      thrown = error
+    }
+
+    expect(thrown).toBeInstanceOf(LegacyResolverUnavailableError)
+    expect((thrown as LegacyResolverUnavailableError).diagnostics).toMatchObject({
+      category: "http",
+      attempt: 2,
+      httpStatus: 503,
+      errorCode: "LEGACY_TEMPORARILY_UNAVAILABLE",
+    })
   })
 
   test("rejects missing, malformed, insecure, or multiply-active key configuration", () => {
