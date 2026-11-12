@@ -8,7 +8,7 @@ import { rateLimit } from "../../http/rate-limit"
 import { listReferralLinks, getReferralLinkForPartner, getReferralLinksForPartner, getReferralLinkStats } from "./repository"
 import { InvalidReferralDestinationError } from "./destinations"
 import { createReferralLink, recordReferralClickForResolvedLink, renameReferralLink, resolveActiveReferralCode, revokeReferralLink, serializeReferralLink, validateActiveReferralCode } from "./service"
-import { addAttributionHandoff, createAttributionForResolvedLink } from "../referral-analytics/service"
+import { addAttributionHandoff, createAttributionForResolvedLink, isReferralAnalyticsPartnerAllowed } from "../referral-analytics/service"
 import {
   LegacyResolverConfigurationError,
   LegacyResolverInvalidResponseError,
@@ -147,7 +147,7 @@ internalReferralLinkRoutes.post("/click", async (c) => {
   const serialized = serializeReferralLink(result.link)
   let redirectUrl = serialized.targetUrl
 
-  if (env.REFERRAL_ANALYTICS_ENABLED) {
+  if (env.REFERRAL_ANALYTICS_ENABLED && isReferralAnalyticsPartnerAllowed(result.link.partnerId)) {
     const visitKey = c.req.header("x-referral-visit-id") ?? null
     const attribution = await createAttributionForResolvedLink(result, visitKey)
     if (env.REFERRAL_TRACKING_ENABLED && attribution.created) {

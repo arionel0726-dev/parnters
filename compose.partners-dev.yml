@@ -1,0 +1,130 @@
+name: vizaje-partners-dev
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - partners_dev_postgres_data:/var/lib/postgresql/data
+    networks:
+      - partners_dev_internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  api:
+    image: vizaje-partners-api:dev
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+      target: runtime
+    restart: unless-stopped
+    init: true
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      API_PORT: 3001
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET is required}
+      BETTER_AUTH_URL: ${BETTER_AUTH_URL:?BETTER_AUTH_URL is required}
+      AUTH_TRUSTED_ORIGINS: ${AUTH_TRUSTED_ORIGINS:?AUTH_TRUSTED_ORIGINS is required}
+      REFERRAL_SERVICE_TOKEN: ${REFERRAL_SERVICE_TOKEN:?REFERRAL_SERVICE_TOKEN is required}
+      REFERRAL_SHORT_URL_ORIGIN: ${REFERRAL_SHORT_URL_ORIGIN:?REFERRAL_SHORT_URL_ORIGIN is required}
+      VIZAJE_DESTINATION_HOSTS: ${VIZAJE_DESTINATION_HOSTS:?VIZAJE_DESTINATION_HOSTS is required}
+      WEB_APP_URL: ${WEB_APP_URL:?WEB_APP_URL is required}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      EMAIL_FROM: ${EMAIL_FROM:?EMAIL_FROM is required}
+      LEGACY_RESOLVER_ENABLED: ${LEGACY_RESOLVER_ENABLED:-false}
+      LEGACY_INTERNAL_BASE_URL: ${LEGACY_INTERNAL_BASE_URL:-}
+      LEGACY_RESOLVER_HMAC_KEYS: ${LEGACY_RESOLVER_HMAC_KEYS:-}
+      LEGACY_TO_PARTNERS_HMAC_KEYS: ${LEGACY_TO_PARTNERS_HMAC_KEYS:-}
+      LEGACY_ANALYTICS_HMAC_KEYS: ${LEGACY_ANALYTICS_HMAC_KEYS:-}
+      LEGACY_ACCOUNT_LINK_REDIRECT_URI: ${LEGACY_ACCOUNT_LINK_REDIRECT_URI:-}
+      CREATOR_FINANCE_ENABLED: ${CREATOR_FINANCE_ENABLED:-false}
+      PAYOUTS_ENABLED: ${PAYOUTS_ENABLED:-false}
+      REFERRAL_TRACKING_ENABLED: ${REFERRAL_TRACKING_ENABLED:-false}
+      REFERRAL_ANALYTICS_ENABLED: ${REFERRAL_ANALYTICS_ENABLED:-false}
+      REFERRAL_ANALYTICS_ALLOWED_PARTNER_IDS: ${REFERRAL_ANALYTICS_ALLOWED_PARTNER_IDS:-}
+      AUDIT_TECHNICAL_RETENTION_DAYS: ${AUDIT_TECHNICAL_RETENTION_DAYS:-4}
+      AUDIT_BUSINESS_RETENTION_DAYS: ${AUDIT_BUSINESS_RETENTION_DAYS:-365}
+      AUDIT_FINANCIAL_RETENTION_DAYS: ${AUDIT_FINANCIAL_RETENTION_DAYS:-2555}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3101:3001"
+    networks:
+      - partners_dev_internal
+    healthcheck:
+      test:
+        - CMD
+        - bun
+        - -e
+        - "fetch('http://127.0.0.1:3001/health').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  migrate:
+    profiles:
+      - migrations
+    image: vizaje-partners-migrate:dev
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+      target: migration
+    restart: "no"
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+    networks:
+      - partners_dev_internal
+
+  web:
+    image: vizaje-partners-web:dev
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    restart: unless-stopped
+    init: true
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      HOSTNAME: 0.0.0.0
+      PORT: 3000
+      API_INTERNAL_URL: http://api:3001
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:?NEXT_PUBLIC_API_BASE_URL is required}
+      WEB_APP_URL: ${WEB_APP_URL:?WEB_APP_URL is required}
+      REFERRAL_SERVICE_TOKEN: ${REFERRAL_SERVICE_TOKEN:?REFERRAL_SERVICE_TOKEN is required}
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3100:3000"
+    networks:
+      - partners_dev_internal
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+volumes:
+  partners_dev_postgres_data:
+    name: vizaje-partners-dev-postgres-data
+
+networks:
+  partners_dev_internal:
+    name: vizaje-partners-dev-internal
+    driver: bridge

@@ -20,6 +20,7 @@ import {
 
 const previousFeatureFlags = {
   analytics: process.env.REFERRAL_ANALYTICS_ENABLED,
+  allowedPartners: process.env.REFERRAL_ANALYTICS_ALLOWED_PARTNER_IDS,
   tracking: process.env.REFERRAL_TRACKING_ENABLED,
   finance: process.env.CREATOR_FINANCE_ENABLED,
   payouts: process.env.PAYOUTS_ENABLED,
@@ -30,6 +31,7 @@ process.env.LEGACY_ANALYTICS_HMAC_KEYS = JSON.stringify([{ keyId: analyticsKeyId
 
 const { app } = await import("../src/index")
 const { buildAccountLinkCanonicalString } = await import("../src/modules/account-linking/service-auth")
+const { createAttributionContext } = await import("../src/modules/referral-analytics/service")
 
 const db = getDb()
 const serviceToken = process.env.REFERRAL_SERVICE_TOKEN ?? "vizaje-referral-service-local-development-token-2026"
@@ -93,6 +95,7 @@ function signLegacyRequest(path: string, body: unknown, nonce = randomBytes(16).
 
 beforeAll(async () => {
   process.env.REFERRAL_ANALYTICS_ENABLED = "true"
+  process.env.REFERRAL_ANALYTICS_ALLOWED_PARTNER_IDS = partnerId
   process.env.REFERRAL_TRACKING_ENABLED = "false"
   process.env.CREATOR_FINANCE_ENABLED = "false"
   process.env.PAYOUTS_ENABLED = "false"
@@ -159,6 +162,7 @@ afterAll(async () => {
   for (const [name, value] of Object.entries(previousFeatureFlags)) {
     const envName = {
       analytics: "REFERRAL_ANALYTICS_ENABLED",
+      allowedPartners: "REFERRAL_ANALYTICS_ALLOWED_PARTNER_IDS",
       tracking: "REFERRAL_TRACKING_ENABLED",
       finance: "CREATOR_FINANCE_ENABLED",
       payouts: "PAYOUTS_ENABLED",
@@ -220,6 +224,81 @@ describe("referral analytics backend", () => {
       body: JSON.stringify(body),
     })
     expect(invalid.status).toBe(401)
+  })
+
+  test("keeps analytics isolated to the configured test partner", async () => {
+    const previousAllowedPartners = process.env.REFERRAL_ANALYTICS_ALLOWED_PARTNER_IDS
+    process.env.REFERRAL_ANALYTICS_ALLOWED_PARTNER_IDS = crypto.randomUUID()
+    try {
+      const response = await request("/v1/internal/referral-links/click", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-service-token": serviceToken, "x-referral-visit-id": crypto.randomUUID() },
+        body: JSON.stringify({ code }),
+      })
+      expect(response.status).toBe(200)
+      const body = await response.json() as { redirectUrl: string }
+      expect(new URL(body.redirectUrl).searchParams.get("vp_attribution")).toBeNull()
+      expect(await db.select().from(referralAttributions).where(eq(referralAttributions.partnerId, partnerId))).toHaveLength(1)
+    } finally {
+      if (previousAllowedPartners === undefined) delete process.env.REFERRAL_ANALYTICS_ALLOWED_PARTNER_IDS
+      else process.env.REFERRAL_ANALYTICS_ALLOWED_PARTNER_IDS = previousAllowedPartners
+    }
+  })
+
+  test("rejects a handoff context after its partner leaves the allowlist", async () => {
+    const previousAllowedPartners = process.env.REFERRAL_ANALYTICS_ALLOWED_PARTNER_IDS
+    process.env.REFERRAL_ANALYTICS_ALLOWED_PARTNER_IDS = crypto.randomUUID()
+    try {
+      const response = await request("/v1/public/referral-analytics/events", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          eventId: crypto.randomUUID(),
+          eventName: "add_to_cart",
+          attributionContext,
+          occurredAt: new Date().toISOString(),
+          items: [{ legacyProductId: "11048", quantity: 1 }],
+        }),
+      })
+      expect(response.status).toBe(400)
+      expect((await response.json() as { error: { code: string } }).error.code).toBe("ATTRIBUTION_INVALID")
+
+      const orderResponse = await signLegacyRequest("/v1/internal/referral-analytics/order-events", {
+        eventId: crypto.randomUUID(),
+        eventVersion: "v1",
+        eventType: "order.created",
+        orderId: `allowlist-order-${crypto.randomUUID()}`,
+        attributionContext,
+        status: "new",
+        amount: "1.00",
+        currency: "MDL",
+        occurredAt: new Date().toISOString(),
+        items: [{ legacyProductId: "11048", quantity: 1, unitPrice: "1.00", lineTotal: "1.00" }],
+      })
+      expect(orderResponse.status).toBe(400)
+      expect((await orderResponse.json() as { error: { code: string } }).error.code).toBe("ATTRIBUTION_INVALID")
+    } finally {
+      if (previousAllowedPartners === undefined) delete process.env.REFERRAL_ANALYTICS_ALLOWED_PARTNER_IDS
+      else process.env.REFERRAL_ANALYTICS_ALLOWED_PARTNER_IDS = previousAllowedPartners
+    }
+  })
+
+  test("rejects an attribution context after its seven-day TTL", async () => {
+    const attributions = await db.select({ id: referralAttributions.id }).from(referralAttributions).where(eq(referralAttributions.partnerId, partnerId)).limit(1)
+    const expiredContext = createAttributionContext(attributions[0]!.id, new Date(Date.now() - 1000))
+    const response = await request("/v1/public/referral-analytics/events", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        eventId: crypto.randomUUID(),
+        eventName: "add_to_cart",
+        attributionContext: expiredContext,
+        occurredAt: new Date().toISOString(),
+        items: [{ legacyProductId: "11048", quantity: 1 }],
+      }),
+    })
+    expect(response.status).toBe(410)
+    expect((await response.json() as { error: { code: string } }).error.code).toBe("ATTRIBUTION_EXPIRED")
   })
 
   test("ingests add-to-cart idempotently and rejects conflicting payloads", async () => {

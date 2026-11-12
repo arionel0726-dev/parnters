@@ -1,0 +1,71 @@
+# Proposed hostnames; DNS and certificates are not configured yet.
+# Replace certificate paths after ACME issuance.
+
+upstream vizaje_partners_dev_web {
+    server 127.0.0.1:3100;
+}
+
+upstream vizaje_partners_dev_api {
+    server 127.0.0.1:3101;
+}
+
+server {
+    listen 80;
+    server_name partners-dev.vizaje-nica.com;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 80;
+    server_name partners-api-dev.vizaje-nica.com;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl http2;
+    server_name partners-dev.vizaje-nica.com;
+
+    ssl_certificate /etc/letsencrypt/live/partners-dev.vizaje-nica.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/partners-dev.vizaje-nica.com/privkey.pem;
+
+    location / {
+        proxy_pass http://vizaje_partners_dev_web;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+    }
+}
+
+server {
+    listen 443 ssl http2;
+    server_name partners-api-dev.vizaje-nica.com;
+
+    ssl_certificate /etc/letsencrypt/live/partners-api-dev.vizaje-nica.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/partners-api-dev.vizaje-nica.com/privkey.pem;
+
+    location / {
+        proxy_pass http://vizaje_partners_dev_api;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}

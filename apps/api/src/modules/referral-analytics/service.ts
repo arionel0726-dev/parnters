@@ -34,6 +34,10 @@ export class ReferralAnalyticsError extends Error {
 
 type ActiveReferralLink = NonNullable<Awaited<ReturnType<typeof resolveActiveReferralCode>>>
 
+export function isReferralAnalyticsPartnerAllowed(partnerId: string) {
+  return getApiEnv().REFERRAL_ANALYTICS_ALLOWED_PARTNER_IDS.includes(partnerId)
+}
+
 export type AnalyticsItemInput = {
   legacyProductId?: string | null
   legacyProductGuid?: string | null
@@ -170,7 +174,7 @@ export async function getAttributionFromContext(context: string, occurredAt: Dat
     .where(eq(referralAttributions.id, payload.a))
     .limit(1)
   const row = rows[0]
-  if (!row || row.attribution.revokedAt || row.attribution.expiresAt.getTime() <= occurredAt.getTime() || row.link.status !== "active" || row.partner.type !== "creator" || row.partner.status !== "active") {
+  if (!row || !isReferralAnalyticsPartnerAllowed(row.partner.id) || row.attribution.revokedAt || row.attribution.expiresAt.getTime() <= occurredAt.getTime() || row.link.status !== "active" || row.partner.type !== "creator" || row.partner.status !== "active") {
     throw new ReferralAnalyticsError("ATTRIBUTION_INVALID", "Attribution context is not valid.")
   }
   return row
@@ -228,12 +232,15 @@ export function addAttributionHandoff(targetUrl: string, handoffToken: string) {
 
 export async function exchangeAttributionHandoff(handoffToken: string) {
   if (!/^[A-Za-z0-9_-]{40,}$/.test(handoffToken)) throw new ReferralAnalyticsError("ATTRIBUTION_INVALID", "Attribution handoff is invalid.")
+  const allowedPartnerIds = getApiEnv().REFERRAL_ANALYTICS_ALLOWED_PARTNER_IDS
+  if (!allowedPartnerIds.length) throw new ReferralAnalyticsError("ATTRIBUTION_INVALID", "Attribution handoff is invalid or unavailable.")
   const now = new Date()
   const rows = await getDb().transaction(async (tx) => tx
     .update(referralAttributions)
     .set({ consumedAt: now })
     .where(and(
       eq(referralAttributions.tokenHash, hashValue(handoffToken)),
+      inArray(referralAttributions.partnerId, allowedPartnerIds),
       isNull(referralAttributions.consumedAt),
       isNull(referralAttributions.revokedAt),
       gt(referralAttributions.expiresAt, now),

@@ -22,6 +22,10 @@ const envSchema = z.object({
   PAYOUTS_ENABLED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
   REFERRAL_TRACKING_ENABLED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
   REFERRAL_ANALYTICS_ENABLED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
+  REFERRAL_ANALYTICS_ALLOWED_PARTNER_IDS: z.preprocess(
+    (value) => value === "" ? undefined : value,
+    z.string().optional().refine((value) => !value || value.split(",").every((id) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id.trim())), "REFERRAL_ANALYTICS_ALLOWED_PARTNER_IDS must contain UUIDs"),
+  ),
   AUDIT_TECHNICAL_RETENTION_DAYS: z.coerce.number().int().positive().default(4),
   AUDIT_BUSINESS_RETENTION_DAYS: z.coerce.number().int().positive().default(365),
   AUDIT_FINANCIAL_RETENTION_DAYS: z.coerce.number().int().positive().default(2555),
@@ -52,6 +56,7 @@ export function getApiEnv() {
     PAYOUTS_ENABLED: process.env.PAYOUTS_ENABLED,
     REFERRAL_TRACKING_ENABLED: process.env.REFERRAL_TRACKING_ENABLED,
     REFERRAL_ANALYTICS_ENABLED: process.env.REFERRAL_ANALYTICS_ENABLED,
+    REFERRAL_ANALYTICS_ALLOWED_PARTNER_IDS: process.env.REFERRAL_ANALYTICS_ALLOWED_PARTNER_IDS,
     AUDIT_TECHNICAL_RETENTION_DAYS: process.env.AUDIT_TECHNICAL_RETENTION_DAYS,
     AUDIT_BUSINESS_RETENTION_DAYS: process.env.AUDIT_BUSINESS_RETENTION_DAYS,
     AUDIT_FINANCIAL_RETENTION_DAYS: process.env.AUDIT_FINANCIAL_RETENTION_DAYS,
@@ -69,6 +74,10 @@ export function getApiEnv() {
       .filter(Boolean),
     VIZAJE_DESTINATION_HOSTS: env.VIZAJE_DESTINATION_HOSTS.split(",")
       .map((host) => host.trim().toLowerCase())
+      .filter(Boolean),
+    REFERRAL_ANALYTICS_ALLOWED_PARTNER_IDS: (env.REFERRAL_ANALYTICS_ALLOWED_PARTNER_IDS ?? "")
+      .split(",")
+      .map((partnerId) => partnerId.trim())
       .filter(Boolean),
   }
 }
