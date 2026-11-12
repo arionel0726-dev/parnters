@@ -8,6 +8,7 @@ import { rateLimit } from "../../http/rate-limit"
 import { listReferralLinks, getReferralLinkForPartner, getReferralLinksForPartner, getReferralLinkStats } from "./repository"
 import { InvalidReferralDestinationError } from "./destinations"
 import { createReferralLink, recordReferralClickForResolvedLink, renameReferralLink, resolveActiveReferralCode, revokeReferralLink, serializeReferralLink, validateActiveReferralCode } from "./service"
+import { addAttributionHandoff, createAttributionForResolvedLink } from "../referral-analytics/service"
 import {
   LegacyResolverConfigurationError,
   LegacyResolverInvalidResponseError,
@@ -140,13 +141,24 @@ internalReferralLinkRoutes.post("/click", async (c) => {
   const result = await resolveActiveReferralCode(parsed.data.code)
   if (!result) return c.json({ valid: false })
 
-  if (getApiEnv().REFERRAL_TRACKING_ENABLED) {
-    const requestedLocale = c.req.header("x-referral-locale")
-    const locale = requestedLocale === "ru" || requestedLocale === "ro" ? requestedLocale : null
+  const env = getApiEnv()
+  const requestedLocale = c.req.header("x-referral-locale")
+  const locale = requestedLocale === "ru" || requestedLocale === "ro" ? requestedLocale : null
+  const serialized = serializeReferralLink(result.link)
+  let redirectUrl = serialized.targetUrl
+
+  if (env.REFERRAL_ANALYTICS_ENABLED) {
+    const visitKey = c.req.header("x-referral-visit-id") ?? null
+    const attribution = await createAttributionForResolvedLink(result, visitKey)
+    if (env.REFERRAL_TRACKING_ENABLED && attribution.created) {
+      await recordReferralClickForResolvedLink(result, locale, attribution.attribution.id)
+    }
+    if (attribution.handoffToken) redirectUrl = addAttributionHandoff(serialized.targetUrl, attribution.handoffToken)
+  } else if (env.REFERRAL_TRACKING_ENABLED) {
     await recordReferralClickForResolvedLink(result, locale)
   }
 
-  return c.json({ valid: true, link: serializeReferralLink(result.link) })
+  return c.json({ valid: true, link: serialized, redirectUrl })
 })
 
 export async function listAdminReferralLinks(partnerId: string) {

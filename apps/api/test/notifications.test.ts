@@ -108,7 +108,8 @@ describe("notification center", () => {
     const otherCookie = await login(otherEmail)
     const otherPage = await request("/v1/notifications", { headers: { cookie: otherCookie } })
     expect(otherPage.status).toBe(200)
-    expect((await otherPage.json()).notifications).toHaveLength(0)
+    const otherBody = await otherPage.json() as { notifications: unknown[] }
+    expect(otherBody.notifications).toHaveLength(0)
 
     const invalidPageSize = await request("/v1/notifications?pageSize=51", { headers: { cookie: ownerCookie } })
     expect(invalidPageSize.status).toBe(400)
@@ -136,9 +137,11 @@ describe("notification center", () => {
 
     const allRead = await request("/v1/notifications/read-all", { method: "POST", headers: { cookie: ownerCookie } })
     expect(allRead.status).toBe(200)
-    expect((await allRead.json()).markedCount).toBe(2)
+    const allReadBody = await allRead.json() as { markedCount: number }
+    expect(allReadBody.markedCount).toBe(2)
     const repeatedAllRead = await request("/v1/notifications/read-all", { method: "POST", headers: { cookie: ownerCookie } })
-    expect((await repeatedAllRead.json()).markedCount).toBe(0)
+    const repeatedAllReadBody = await repeatedAllRead.json() as { markedCount: number }
+    expect(repeatedAllReadBody.markedCount).toBe(0)
   })
 
   test("creates notifications from application, status and commission events for existing recipients", async () => {

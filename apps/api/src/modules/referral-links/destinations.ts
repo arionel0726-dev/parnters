@@ -52,7 +52,7 @@ export function parseReferralDestination(targetUrl: string, linkType: keyof type
   if (parsed.username || parsed.password || parsed.hash) {
     throw new InvalidReferralDestinationError("Ссылка не должна содержать credentials или hash.")
   }
-  if ([...parsed.searchParams.keys()].some((key) => /^(?:redirect(?:_uri|_url)?|return(?:_to|url)?|next|continue|destination|target)$/i.test(key))) {
+  if ([...parsed.searchParams.keys()].some((key) => /^(?:redirect(?:_uri|_url)?|return(?:_to|url)?|next|continue|destination|target|vp_attribution)$/i.test(key))) {
     throw new InvalidReferralDestinationError("Ссылка не должна содержать параметры перенаправления.")
   }
 

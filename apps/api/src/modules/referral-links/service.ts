@@ -52,10 +52,11 @@ export async function resolveActiveReferralCode(code: string) {
   return getActiveReferralLinkByCode(code)
 }
 
-export async function recordReferralClickForResolvedLink(result: ActiveReferralLink, locale: "ru" | "ro" | null) {
+export async function recordReferralClickForResolvedLink(result: ActiveReferralLink, locale: "ru" | "ro" | null, attributionId?: string) {
   await getDb().insert(referralLinkClicks).values({
     referralLinkId: result.link.id,
     partnerId: result.link.partnerId,
+    attributionId,
     locale,
     clickedAt: new Date(),
     createdAt: new Date(),

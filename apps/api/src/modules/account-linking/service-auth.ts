@@ -10,11 +10,11 @@ import { apiError } from "../../http/errors"
 const timestampSkewSeconds = 60
 const nonceRetentionSeconds = 10 * 60
 
-const keyRingSchema = z.array(z.object({
-  keyId: z.string().regex(/^legacy-to-partners-[A-Za-z0-9._-]+$/),
+const serviceKeySchema = z.object({
+  keyId: z.string(),
   secret: z.string().min(43),
   active: z.boolean(),
-}).strict()).min(1)
+}).strict()
 
 type ServiceKey = { keyId: string; secret: Buffer; active: boolean }
 
@@ -38,7 +38,7 @@ export function buildAccountLinkCanonicalString(input: {
   ].join("\n")
 }
 
-function parseKeyRing(raw: string): ServiceKey[] | null {
+function parseKeyRing(raw: string, keyIdPattern: RegExp): ServiceKey[] | null {
   let parsed: unknown
   try {
     parsed = JSON.parse(raw)
@@ -46,7 +46,7 @@ function parseKeyRing(raw: string): ServiceKey[] | null {
     return null
   }
 
-  const result = keyRingSchema.safeParse(parsed)
+  const result = z.array(serviceKeySchema.extend({ keyId: z.string().regex(keyIdPattern) })).min(1).safeParse(parsed)
   if (!result.success || result.data.filter((key) => key.active).length !== 1) return null
 
   const keyIds = new Set<string>()
@@ -67,7 +67,7 @@ function parseKeyRing(raw: string): ServiceKey[] | null {
 
 export function hasLegacyToPartnersHmacConfiguration() {
   const rawKeyRing = getApiEnv().LEGACY_TO_PARTNERS_HMAC_KEYS
-  return rawKeyRing ? parseKeyRing(rawKeyRing) !== null : false
+  return rawKeyRing ? parseKeyRing(rawKeyRing, /^legacy-to-partners-[A-Za-z0-9._-]+$/) !== null : false
 }
 
 function singleHeader(headers: Headers, name: string) {
@@ -100,44 +100,65 @@ async function reserveNonce(keyId: string, nonce: string, now: Date) {
   return Boolean(rows[0])
 }
 
-export const requireLegacyToPartnersHmac: MiddlewareHandler<ApiEnv> = async (c, next) => {
-  const rawKeyRing = getApiEnv().LEGACY_TO_PARTNERS_HMAC_KEYS
-  const keys = rawKeyRing ? parseKeyRing(rawKeyRing) : null
-  if (!keys) return apiError(c, 503, "ACCOUNT_LINKING_NOT_CONFIGURED", "Account linking is not configured.")
+function legacyHmacMiddleware(input: {
+  getKeyRing: () => string | undefined
+  keyIdPattern: RegExp
+  notConfiguredCode: string
+  notConfiguredMessage: string
+}): MiddlewareHandler<ApiEnv> {
+  return async (c, next) => {
+    const rawKeyRing = input.getKeyRing()
+    const keys = rawKeyRing ? parseKeyRing(rawKeyRing, input.keyIdPattern) : null
+    if (!keys) return apiError(c, 503, input.notConfiguredCode, input.notConfiguredMessage)
 
-  const keyId = singleHeader(c.req.raw.headers, "x-vp-key-id")
-  const timestamp = singleHeader(c.req.raw.headers, "x-vp-timestamp")
-  const nonce = singleHeader(c.req.raw.headers, "x-vp-nonce")
-  const signature = singleHeader(c.req.raw.headers, "x-vp-signature")
-  if (
-    !keyId || !timestamp || !nonce || !signature ||
-    !/^\d+$/.test(timestamp) || !/^[A-Za-z0-9_-]{22}$/.test(nonce)
-  ) return apiError(c, 401, "SERVICE_AUTH_INVALID", "Service authentication required.")
+    const keyId = singleHeader(c.req.raw.headers, "x-vp-key-id")
+    const timestamp = singleHeader(c.req.raw.headers, "x-vp-timestamp")
+    const nonce = singleHeader(c.req.raw.headers, "x-vp-nonce")
+    const signature = singleHeader(c.req.raw.headers, "x-vp-signature")
+    if (
+      !keyId || !timestamp || !nonce || !signature ||
+      !/^\d+$/.test(timestamp) || !/^[A-Za-z0-9_-]{22}$/.test(nonce)
+    ) return apiError(c, 401, "SERVICE_AUTH_INVALID", "Service authentication required.")
 
-  const timestampSeconds = Number(timestamp)
-  if (!Number.isSafeInteger(timestampSeconds) || Math.abs(Math.floor(Date.now() / 1000) - timestampSeconds) > timestampSkewSeconds) {
-    return apiError(c, 401, "SERVICE_TIMESTAMP_INVALID", "Service timestamp is invalid.")
+    const timestampSeconds = Number(timestamp)
+    if (!Number.isSafeInteger(timestampSeconds) || Math.abs(Math.floor(Date.now() / 1000) - timestampSeconds) > timestampSkewSeconds) {
+      return apiError(c, 401, "SERVICE_TIMESTAMP_INVALID", "Service timestamp is invalid.")
+    }
+
+    const key = keys.find((candidate) => candidate.keyId === keyId && candidate.active)
+    if (!key) return apiError(c, 401, "SERVICE_AUTH_INVALID", "Service authentication required.")
+
+    const rawBody = await c.req.raw.clone().text()
+    const requestUrl = new URL(c.req.url)
+    const canonical = buildAccountLinkCanonicalString({
+      keyId,
+      method: c.req.method,
+      pathAndQuery: `${requestUrl.pathname}${requestUrl.search}`,
+      timestamp,
+      nonce,
+      rawBody,
+    })
+    const expectedSignature = createHmac("sha256", key.secret).update(canonical, "utf8").digest("hex")
+    if (!validSignature(expectedSignature, signature)) return apiError(c, 401, "SERVICE_AUTH_INVALID", "Service authentication required.")
+
+    if (!await reserveNonce(keyId, nonce, new Date())) {
+      return apiError(c, 409, "AUTH_NONCE_REPLAY", "Request nonce has already been used.")
+    }
+
+    await next()
   }
-
-  const key = keys.find((candidate) => candidate.keyId === keyId && candidate.active)
-  if (!key) return apiError(c, 401, "SERVICE_AUTH_INVALID", "Service authentication required.")
-
-  const rawBody = await c.req.raw.clone().text()
-  const requestUrl = new URL(c.req.url)
-  const canonical = buildAccountLinkCanonicalString({
-    keyId,
-    method: c.req.method,
-    pathAndQuery: `${requestUrl.pathname}${requestUrl.search}`,
-    timestamp,
-    nonce,
-    rawBody,
-  })
-  const expectedSignature = createHmac("sha256", key.secret).update(canonical, "utf8").digest("hex")
-  if (!validSignature(expectedSignature, signature)) return apiError(c, 401, "SERVICE_AUTH_INVALID", "Service authentication required.")
-
-  if (!await reserveNonce(keyId, nonce, new Date())) {
-    return apiError(c, 409, "AUTH_NONCE_REPLAY", "Request nonce has already been used.")
-  }
-
-  await next()
 }
+
+export const requireLegacyToPartnersHmac: MiddlewareHandler<ApiEnv> = legacyHmacMiddleware({
+  getKeyRing: () => getApiEnv().LEGACY_TO_PARTNERS_HMAC_KEYS,
+  keyIdPattern: /^legacy-to-partners-[A-Za-z0-9._-]+$/,
+  notConfiguredCode: "ACCOUNT_LINKING_NOT_CONFIGURED",
+  notConfiguredMessage: "Account linking is not configured.",
+})
+
+export const requireLegacyAnalyticsHmac: MiddlewareHandler<ApiEnv> = legacyHmacMiddleware({
+  getKeyRing: () => getApiEnv().LEGACY_ANALYTICS_HMAC_KEYS,
+  keyIdPattern: /^legacy-analytics-to-partners-[A-Za-z0-9._-]+$/,
+  notConfiguredCode: "REFERRAL_ANALYTICS_NOT_CONFIGURED",
+  notConfiguredMessage: "Referral analytics is not configured.",
+})

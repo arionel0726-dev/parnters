@@ -1,4 +1,5 @@
 import { createHash, createHmac } from "node:crypto"
+import { createServer } from "node:net"
 import { describe, expect, test } from "bun:test"
 import {
   buildResolverCanonicalString,
@@ -66,6 +67,22 @@ function categoryResponse(requestedLocale: "ru" | "ro" = "ro", ruUri = "paletki"
 
 function response(status: number, body: unknown, headers = new Headers()): Response {
   return new Response(JSON.stringify(body), { status, headers })
+}
+
+async function getFreeLocalPort() {
+  return new Promise<number>((resolve, reject) => {
+    const probe = createServer()
+    probe.once("error", reject)
+    probe.listen(0, "127.0.0.1", () => {
+      const address = probe.address()
+      if (!address || typeof address === "string") {
+        probe.close()
+        reject(new Error("Unable to determine a free local port"))
+        return
+      }
+      probe.close((error) => error ? reject(error) : resolve(address.port))
+    })
+  })
 }
 
 function makeClient(transport: ResolverTransport, overrides: Partial<Parameters<typeof createLegacyResolverClient>[0]> = {}) {
@@ -141,9 +158,10 @@ describe("Legacy resolver client (M5.1 v1)", () => {
 
   test("uses Bun's Undici dispatcher and sends an explicit resolver User-Agent", async () => {
     let userAgent: string | null = null
+    const port = await getFreeLocalPort()
     const server = Bun.serve({
-      // Bun 1.3.14 rejects port 0, so keep this local-only probe on a fixed test port.
-      port: 39147,
+      hostname: "127.0.0.1",
+      port,
       fetch(request) {
         userAgent = request.headers.get("user-agent")
         return new Response(JSON.stringify(productResponse("ro")), {

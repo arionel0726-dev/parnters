@@ -21,6 +21,7 @@ const envSchema = z.object({
   CREATOR_FINANCE_ENABLED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
   PAYOUTS_ENABLED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
   REFERRAL_TRACKING_ENABLED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
+  REFERRAL_ANALYTICS_ENABLED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
   AUDIT_TECHNICAL_RETENTION_DAYS: z.coerce.number().int().positive().default(4),
   AUDIT_BUSINESS_RETENTION_DAYS: z.coerce.number().int().positive().default(365),
   AUDIT_FINANCIAL_RETENTION_DAYS: z.coerce.number().int().positive().default(2555),
@@ -28,6 +29,8 @@ const envSchema = z.object({
   LEGACY_RESOLVER_HMAC_KEYS: z.preprocess((value) => value === "" ? undefined : value, z.string().optional()),
   // Separate Legacy -> Partners key ring. Never reuse the Partners -> Legacy resolver keys.
   LEGACY_TO_PARTNERS_HMAC_KEYS: z.preprocess((value) => value === "" ? undefined : value, z.string().optional()),
+  // Analytics uses its own Legacy -> Partners key ring, separate from account linking.
+  LEGACY_ANALYTICS_HMAC_KEYS: z.preprocess((value) => value === "" ? undefined : value, z.string().optional()),
   LEGACY_ACCOUNT_LINK_REDIRECT_URI: z.preprocess((value) => value === "" ? undefined : value, z.string().url().optional()),
 })
 
@@ -48,12 +51,14 @@ export function getApiEnv() {
     CREATOR_FINANCE_ENABLED: process.env.CREATOR_FINANCE_ENABLED,
     PAYOUTS_ENABLED: process.env.PAYOUTS_ENABLED,
     REFERRAL_TRACKING_ENABLED: process.env.REFERRAL_TRACKING_ENABLED,
+    REFERRAL_ANALYTICS_ENABLED: process.env.REFERRAL_ANALYTICS_ENABLED,
     AUDIT_TECHNICAL_RETENTION_DAYS: process.env.AUDIT_TECHNICAL_RETENTION_DAYS,
     AUDIT_BUSINESS_RETENTION_DAYS: process.env.AUDIT_BUSINESS_RETENTION_DAYS,
     AUDIT_FINANCIAL_RETENTION_DAYS: process.env.AUDIT_FINANCIAL_RETENTION_DAYS,
     LEGACY_INTERNAL_BASE_URL: process.env.LEGACY_INTERNAL_BASE_URL,
     LEGACY_RESOLVER_HMAC_KEYS: process.env.LEGACY_RESOLVER_HMAC_KEYS,
     LEGACY_TO_PARTNERS_HMAC_KEYS: process.env.LEGACY_TO_PARTNERS_HMAC_KEYS,
+    LEGACY_ANALYTICS_HMAC_KEYS: process.env.LEGACY_ANALYTICS_HMAC_KEYS,
     LEGACY_ACCOUNT_LINK_REDIRECT_URI: process.env.LEGACY_ACCOUNT_LINK_REDIRECT_URI,
   })
 

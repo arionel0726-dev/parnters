@@ -39,6 +39,14 @@ export const invitationStatusEnum = pgEnum("invitation_status", ["pending", "acc
 export const referralLinkTypeEnum = pgEnum("referral_link_type", ["homepage", "product", "category", "brand"])
 export const referralLinkStatusEnum = pgEnum("referral_link_status", ["active", "revoked"])
 export const referralOrderStatusEnum = pgEnum("referral_order_status", ["confirmed", "cancelled"])
+export const referralAnalyticsEventNameEnum = pgEnum("referral_analytics_event_name", [
+  "add_to_cart",
+  "order.created",
+  "order.updated",
+  "order.confirmed",
+  "order.cancelled",
+])
+export const referralAnalyticsSourceEnum = pgEnum("referral_analytics_source", ["browser", "legacy"])
 export const payoutStatusEnum = pgEnum("payout_status", ["requested", "approved", "paid", "rejected", "cancelled"])
 export const notificationTypeEnum = pgEnum("notification_type", [
   "creator_application_submitted",
@@ -148,6 +156,32 @@ export const referralLinks = pgTable(
   ],
 )
 
+export const referralAttributions = pgTable(
+  "referral_attributions",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    tokenHash: text("token_hash").notNull(),
+    referralLinkId: uuid("referral_link_id")
+      .notNull()
+      .references(() => referralLinks.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    partnerId: uuid("partner_id")
+      .notNull()
+      .references(() => partners.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    visitKeyHash: text("visit_key_hash"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+  },
+  (table) => [
+    uniqueIndex("referral_attributions_token_hash_unique").on(table.tokenHash),
+    index("referral_attributions_link_idx").on(table.referralLinkId, table.createdAt),
+    index("referral_attributions_partner_idx").on(table.partnerId, table.createdAt),
+    index("referral_attributions_visit_idx").on(table.referralLinkId, table.visitKeyHash, table.createdAt),
+    index("referral_attributions_expiry_idx").on(table.expiresAt),
+  ],
+)
+
 export const referralLinkClicks = pgTable(
   "referral_link_clicks",
   {
@@ -155,6 +189,7 @@ export const referralLinkClicks = pgTable(
     referralLinkId: uuid("referral_link_id")
       .notNull()
       .references(() => referralLinks.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    attributionId: uuid("attribution_id").references(() => referralAttributions.id, { onDelete: "set null", onUpdate: "cascade" }),
     partnerId: uuid("partner_id")
       .notNull()
       .references(() => partners.id, { onDelete: "cascade", onUpdate: "cascade" }),
@@ -165,6 +200,55 @@ export const referralLinkClicks = pgTable(
   (table) => [
     index("referral_link_clicks_link_idx").on(table.referralLinkId, table.clickedAt),
     index("referral_link_clicks_partner_idx").on(table.partnerId, table.clickedAt),
+  ],
+)
+
+export const referralAnalyticsEvents = pgTable(
+  "referral_analytics_events",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    eventId: uuid("event_id").notNull(),
+    dedupeKey: text("dedupe_key").notNull(),
+    payloadHash: text("payload_hash").notNull(),
+    eventName: referralAnalyticsEventNameEnum("event_name").notNull(),
+    attributionId: uuid("attribution_id").references(() => referralAttributions.id, { onDelete: "set null", onUpdate: "cascade" }),
+    referralLinkId: uuid("referral_link_id").references(() => referralLinks.id, { onDelete: "set null", onUpdate: "cascade" }),
+    partnerId: uuid("partner_id").references(() => partners.id, { onDelete: "set null", onUpdate: "cascade" }),
+    source: referralAnalyticsSourceEnum("source").notNull(),
+    legacyOrderId: text("legacy_order_id"),
+    status: text("status"),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    receivedAt: timestamp("received_at", { withTimezone: true }).defaultNow().notNull(),
+    metadata: jsonb("metadata").notNull().default(sql`'{}'::jsonb`),
+  },
+  (table) => [
+    uniqueIndex("referral_analytics_events_event_unique").on(table.eventId),
+    uniqueIndex("referral_analytics_events_dedupe_unique").on(table.dedupeKey),
+    index("referral_analytics_events_attribution_idx").on(table.attributionId, table.occurredAt),
+    index("referral_analytics_events_link_idx").on(table.referralLinkId, table.occurredAt),
+    index("referral_analytics_events_partner_idx").on(table.partnerId, table.occurredAt),
+    index("referral_analytics_events_order_idx").on(table.legacyOrderId, table.occurredAt),
+  ],
+)
+
+export const referralAnalyticsItems = pgTable(
+  "referral_analytics_items",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    eventId: uuid("event_id")
+      .notNull()
+      .references(() => referralAnalyticsEvents.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    legacyProductId: text("legacy_product_id"),
+    legacyProductGuid: text("legacy_product_guid"),
+    quantity: integer("quantity").notNull(),
+    unitPrice: numeric("unit_price", { precision: 12, scale: 2 }),
+    currency: text("currency").notNull().default("MDL"),
+    lineTotal: numeric("line_total", { precision: 12, scale: 2 }),
+  },
+  (table) => [
+    index("referral_analytics_items_event_idx").on(table.eventId),
+    index("referral_analytics_items_product_idx").on(table.legacyProductId),
+    check("referral_analytics_items_quantity_positive", sql`${table.quantity} > 0`),
   ],
 )
 
@@ -579,8 +663,14 @@ export type PartnerAccount = typeof partnerAccounts.$inferSelect
 export type NewPartnerAccount = typeof partnerAccounts.$inferInsert
 export type ReferralLink = typeof referralLinks.$inferSelect
 export type NewReferralLink = typeof referralLinks.$inferInsert
+export type ReferralAttribution = typeof referralAttributions.$inferSelect
+export type NewReferralAttribution = typeof referralAttributions.$inferInsert
 export type ReferralLinkClick = typeof referralLinkClicks.$inferSelect
 export type NewReferralLinkClick = typeof referralLinkClicks.$inferInsert
+export type ReferralAnalyticsEvent = typeof referralAnalyticsEvents.$inferSelect
+export type NewReferralAnalyticsEvent = typeof referralAnalyticsEvents.$inferInsert
+export type ReferralAnalyticsItem = typeof referralAnalyticsItems.$inferSelect
+export type NewReferralAnalyticsItem = typeof referralAnalyticsItems.$inferInsert
 export type ReferralOrder = typeof referralOrders.$inferSelect
 export type NewReferralOrder = typeof referralOrders.$inferInsert
 export type Payout = typeof payouts.$inferSelect
