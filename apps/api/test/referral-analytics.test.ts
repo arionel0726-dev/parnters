@@ -173,6 +173,19 @@ afterAll(async () => {
 })
 
 describe("referral analytics backend", () => {
+  test("separates referral analytics from disabled M4 finance on empty data", async () => {
+    const financeResponse = await request("/v1/partner/analytics", { headers: { cookie: creatorCookie } })
+    expect(financeResponse.status).toBe(503)
+    expect(await financeResponse.json()).toMatchObject({ error: { code: "FEATURE_DISABLED", details: { feature: "CREATOR_FINANCE_ENABLED" } } })
+
+    const referralResponse = await request("/v1/partner/referral-analytics", { headers: { cookie: creatorCookie } })
+    expect(referralResponse.status).toBe(200)
+    expect(await referralResponse.json()).toMatchObject({
+      summary: { clicks: 0, addToCart: 0, createdOrders: 0, confirmedOrders: 0, cancelledOrders: 0, revenueMdl: "0.00", conversionRate: 0 },
+      links: [{ clicks: 0, addToCart: 0, createdOrders: 0, confirmedOrders: 0, cancelledOrders: 0, revenueMdl: "0.00", conversionRate: 0 }],
+    })
+  })
+
   test("creates a deduplicated attribution handoff without requiring tracking", async () => {
     const response = await request("/v1/internal/referral-links/click", {
       method: "POST",
@@ -357,7 +370,7 @@ describe("referral analytics backend", () => {
     expect(events.find((event) => event.eventName === "order.created")?.metadata).toEqual({ amount: "249.90", currency: "MDL" })
     expect(await db.select().from(referralOrders).where(eq(referralOrders.orderId, orderId))).toHaveLength(0)
 
-    const creatorAnalytics = await request("/v1/partner/analytics", { headers: { cookie: creatorCookie } })
+    const creatorAnalytics = await request("/v1/partner/referral-analytics", { headers: { cookie: creatorCookie } })
     expect(creatorAnalytics.status).toBe(200)
     const creatorAnalyticsBody = await creatorAnalytics.json() as { summary: { clicks: number; addToCart: number; createdOrders: number; confirmedOrders: number; cancelledOrders: number; revenueMdl: string } }
     expect(creatorAnalyticsBody.summary).toMatchObject({ clicks: 1, addToCart: 1, createdOrders: 1, confirmedOrders: 0, cancelledOrders: 1, revenueMdl: "0.00" })

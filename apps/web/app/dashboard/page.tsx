@@ -15,6 +15,7 @@ import type { CreatorDashboardData } from "@/components/creator-dashboard/types"
 import { useDashboardLocale } from "@/components/dashboard/dashboard-locale-provider"
 import { CreatorDashboardSkeleton, InlineListSkeleton } from "@/components/ui/page-skeletons"
 import type { DashboardCopy } from "@/lib/dashboard-translations"
+import { getApiErrorCode, parseCreatorFinanceAnalyticsResponse, type CreatorFinanceAnalyticsResponse } from "@/lib/creator-finance-response"
 
 type ReferralLink = {
   id: string
@@ -33,20 +34,8 @@ type ReferralLink = {
   targetUrl: string
 }
 
-type FinanceSummary = {
-  clicks: number
-  orders: number
-  grossSales: string
-  commission: string
-  requestedPayout: string
-  paidPayout: string
-  availablePayout: string
-  availableByCurrency: Array<{ currency: string; amount: string }>
-}
-type FinanceOrder = { id: string; orderId: string; amount: string; currency: string; commissionAmount: string; status: "confirmed" | "cancelled"; occurredAt: string; linkLabel: string }
-type FinanceData = { summary: FinanceSummary; orders: FinanceOrder[] }
-
 type LoadState = "loading" | "ready" | "error"
+type FinanceLoadState = "loading" | "ready" | "disabled" | "error"
 
 const numberFormat = new Intl.NumberFormat("ru-RU")
 function formatDate(value: string, locale: "ru" | "ro") {
@@ -149,7 +138,8 @@ export default function CreatorDashboardPage() {
   const [dashboardState, setDashboardState] = useState<LoadState>("loading")
   const [referralLinks, setReferralLinks] = useState<ReferralLink[]>([])
   const [linksState, setLinksState] = useState<LoadState>("loading")
-  const [finance, setFinance] = useState<FinanceData | null>(null)
+  const [finance, setFinance] = useState<CreatorFinanceAnalyticsResponse | null>(null)
+  const [financeState, setFinanceState] = useState<FinanceLoadState>("loading")
 
   useEffect(() => {
     let current = true
@@ -181,11 +171,26 @@ export default function CreatorDashboardPage() {
 
     void fetch("/api/partner/analytics", { cache: "no-store" })
       .then(async (response) => {
-        if (!response.ok) throw new Error("finance unavailable")
-        return await response.json() as FinanceData
+        const body: unknown = await response.json()
+        if (!response.ok) {
+          if (getApiErrorCode(body) === "FEATURE_DISABLED") {
+            if (current) setFinanceState("disabled")
+            return null
+          }
+          throw new Error("finance unavailable")
+        }
+        return parseCreatorFinanceAnalyticsResponse(body)
       })
-      .then((data) => { if (current) setFinance(data) })
-      .catch(() => { if (current) setFinance(null) })
+      .then((data) => {
+        if (!current || !data) return
+        setFinance(data)
+        setFinanceState("ready")
+      })
+      .catch(() => {
+        if (!current) return
+        setFinance(null)
+        setFinanceState("error")
+      })
 
     return () => { current = false }
   }, [])
@@ -226,6 +231,9 @@ export default function CreatorDashboardPage() {
         </Link>
       </header>
 
+      {financeState === "disabled" ? <p className="vp-surface-card p-4 text-sm text-muted-foreground" role="status">{copy.finance.disabled}</p> : null}
+      {financeState === "error" ? <div className="vp-surface-card flex flex-wrap items-center justify-between gap-3 border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive" role="alert"><span>{copy.finance.loadError}</span><button type="button" className="underline" onClick={() => window.location.reload()}>{copy.dashboard.retry}</button></div> : null}
+
       <section className="vp-balance-card" aria-labelledby="available-balance-heading">
         <div className="vp-balance-copy">
           <p className="vp-balance-label" id="available-balance-heading">{copy.dashboard.availableBalance}</p>
@@ -246,14 +254,14 @@ export default function CreatorDashboardPage() {
       </section>
 
       <section className="vp-section-grid" aria-label={copy.dashboard.keyMetrics}>
-        <MetricCard icon={ReceiptText} label={copy.dashboard.confirmedOrders} value={numberOrDash(finance?.summary.orders)} hint={finance ? copy.finance.orders : copy.dashboard.ordersNotConnected} />
-        <MetricCard icon={MousePointer2} label={copy.dashboard.conversion} value={conversionValue} hint={finance ? copy.finance.clicks : copy.dashboard.noClickData} />
+        <MetricCard icon={ReceiptText} label={copy.dashboard.confirmedOrders} value={numberOrDash(finance?.summary.orders)} hint={financeState === "disabled" ? copy.finance.disabled : finance ? copy.finance.orders : copy.dashboard.ordersNotConnected} />
+        <MetricCard icon={MousePointer2} label={copy.dashboard.conversion} value={conversionValue} hint={financeState === "disabled" ? copy.finance.disabled : finance ? copy.finance.clicks : copy.dashboard.noClickData} />
         <MetricCard icon={Link2} label={copy.dashboard.activeLinks} value={numberFormat.format(links.active)} hint={`${numberFormat.format(links.total)} ${copy.dashboard.totalCreated}`} />
       </section>
 
       <section className="vp-mobile-metrics vp-surface-card" aria-label={copy.dashboard.keyMetrics}>
-        <MobileMetric icon={MousePointer2} label={copy.dashboard.clicks} value={numberOrDash(finance?.summary.clicks)} hint={finance ? copy.finance.clicks : copy.dashboard.clicksNotConnected} />
-        <MobileMetric icon={ReceiptText} label={copy.dashboard.orders} value={numberOrDash(finance?.summary.orders)} hint={finance ? copy.finance.orders : copy.dashboard.ordersNotConnected} />
+        <MobileMetric icon={MousePointer2} label={copy.dashboard.clicks} value={numberOrDash(finance?.summary.clicks)} hint={financeState === "disabled" ? copy.finance.disabled : finance ? copy.finance.clicks : copy.dashboard.clicksNotConnected} />
+        <MobileMetric icon={ReceiptText} label={copy.dashboard.orders} value={numberOrDash(finance?.summary.orders)} hint={financeState === "disabled" ? copy.finance.disabled : finance ? copy.finance.orders : copy.dashboard.ordersNotConnected} />
         <MobileMetric icon={Link2} label={copy.dashboard.activeLinks} value={numberFormat.format(links.active)} hint={copy.dashboard.activeLinksCount} />
       </section>
 

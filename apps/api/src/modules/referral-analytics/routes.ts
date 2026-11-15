@@ -1,7 +1,6 @@
 import { Hono } from "hono"
 import { z } from "zod"
 import { requireAuth, requirePartner, type ApiEnv } from "../../auth/middleware"
-import { getApiEnv } from "../../env"
 import { requireLegacyAnalyticsHmac } from "../account-linking/service-auth"
 import { requireFeature } from "../../http/feature-flags"
 import { apiError } from "../../http/errors"
@@ -148,10 +147,7 @@ internalReferralAnalyticsRoutes.post("/order-events", async (c) => {
 
 export const creatorReferralAnalyticsRoutes = new Hono<ApiEnv>()
 creatorReferralAnalyticsRoutes.use("*", requireAuth, requirePartner)
-creatorReferralAnalyticsRoutes.get("/analytics", async (c, next) => {
-  // `/v1/partner/analytics` was already used by the M4 finance module.
-  // Let the older route handle it while referral analytics is disabled.
-  if (!getApiEnv().REFERRAL_ANALYTICS_ENABLED) return next()
+creatorReferralAnalyticsRoutes.get("/referral-analytics", requireFeature("REFERRAL_ANALYTICS_ENABLED"), async (c) => {
   const analytics = await getCreatorReferralAnalytics(c.get("partner").id)
   return c.json(analytics)
 })
