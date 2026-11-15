@@ -16,6 +16,7 @@ import { internalReferralOrderRoutes } from './modules/referral-orders/routes'
 import { adminEmailDeliveryRoutes } from './modules/email-deliveries/routes'
 import { notificationRoutes } from './modules/notifications/routes'
 import { creatorAccountLinkRoutes, legacyAccountLinkRoutes } from './modules/account-linking/routes'
+import { legacyCreatorDashboardRoutes } from './modules/legacy-creator-dashboard/routes'
 import { creatorReferralAnalyticsRoutes, internalReferralAnalyticsRoutes, publicReferralAnalyticsRoutes } from './modules/referral-analytics/routes'
 import { requireServiceAuth } from './auth/middleware'
 import { rateLimit } from './http/rate-limit'
@@ -99,6 +100,7 @@ app.route('/v1/partner', creatorFinanceRoutes)
 // Register it before the M4 service-token guard so the two auth contracts do
 // not overlap.
 app.route('/v1/internal/account-linking', legacyAccountLinkRoutes)
+app.route('/v1/internal/creator-dashboard', legacyCreatorDashboardRoutes)
 app.route('/v1/internal/referral-analytics', internalReferralAnalyticsRoutes)
 
 app.use('/v1/internal/*', requireServiceAuth)

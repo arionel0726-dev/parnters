@@ -593,6 +593,52 @@ export const legacyAccountLinkNonces = pgTable(
   ],
 )
 
+// A grant is created only after the authenticated creator approves the
+// one-time account-link code. The opaque token is returned to Legacy once;
+// Partners stores only its hash and scopes it to that Legacy client and creator.
+export const legacyCreatorAccessGrants = pgTable(
+  "legacy_creator_access_grants",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    tokenHash: text("token_hash").notNull(),
+    legacyClientId: text("legacy_client_id").notNull(),
+    partnerId: uuid("partner_id")
+      .notNull()
+      .references(() => partners.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    scopes: text("scopes").array().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (table) => [
+    uniqueIndex("legacy_creator_access_grants_token_hash_unique").on(table.tokenHash),
+    uniqueIndex("legacy_creator_access_grants_active_client_unique").on(table.legacyClientId).where(sql`${table.revokedAt} IS NULL`),
+    uniqueIndex("legacy_creator_access_grants_active_partner_unique").on(table.partnerId).where(sql`${table.revokedAt} IS NULL`),
+    index("legacy_creator_access_grants_partner_idx").on(table.partnerId, table.createdAt),
+  ],
+)
+
+// Link creation idempotency is scoped to the bound access grant. The row and
+// referral link are committed in one transaction so retries cannot duplicate
+// links, even if the first HTTP response is lost.
+export const legacyReferralLinkIdempotency = pgTable(
+  "legacy_referral_link_idempotency",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    grantId: uuid("grant_id")
+      .notNull()
+      .references(() => legacyCreatorAccessGrants.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    idempotencyKey: text("idempotency_key").notNull(),
+    requestHash: text("request_hash").notNull(),
+    referralLinkId: uuid("referral_link_id").references(() => referralLinks.id, { onDelete: "set null", onUpdate: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("legacy_referral_link_idempotency_grant_key_unique").on(table.grantId, table.idempotencyKey),
+    index("legacy_referral_link_idempotency_link_idx").on(table.referralLinkId),
+  ],
+)
+
 export const authSessions = pgTable(
   "sessions",
   {
@@ -696,6 +742,10 @@ export type LegacyAccountLinkInitiation = typeof legacyAccountLinkInitiations.$i
 export type NewLegacyAccountLinkInitiation = typeof legacyAccountLinkInitiations.$inferInsert
 export type LegacyAccountLinkNonce = typeof legacyAccountLinkNonces.$inferSelect
 export type NewLegacyAccountLinkNonce = typeof legacyAccountLinkNonces.$inferInsert
+export type LegacyCreatorAccessGrant = typeof legacyCreatorAccessGrants.$inferSelect
+export type NewLegacyCreatorAccessGrant = typeof legacyCreatorAccessGrants.$inferInsert
+export type LegacyReferralLinkIdempotency = typeof legacyReferralLinkIdempotency.$inferSelect
+export type NewLegacyReferralLinkIdempotency = typeof legacyReferralLinkIdempotency.$inferInsert
 export type AuthSession = typeof authSessions.$inferSelect
 export type AuthAccount = typeof authAccounts.$inferSelect
 export type AuthVerification = typeof authVerifications.$inferSelect

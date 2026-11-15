@@ -10,8 +10,11 @@ import {
   legacyAccountLinkCodes,
   legacyAccountLinkInitiations,
   legacyAccountLinkNonces,
+  legacyCreatorAccessGrants,
+  legacyReferralLinkIdempotency,
   partnerAccounts,
   partners,
+  referralLinks,
   users,
 } from "@vizaje/db"
 import { app } from "../src/index"
@@ -26,9 +29,14 @@ const createdUserIds: string[] = []
 const createdPartnerIds: string[] = []
 const createdCodeHashes: string[] = []
 const createdTicketHashes: string[] = []
+const createdGrantHashes: string[] = []
+const createdReferralLinkIds: string[] = []
 
 process.env.LEGACY_ACCOUNT_LINK_REDIRECT_URI = redirectUri
 process.env.LEGACY_TO_PARTNERS_HMAC_KEYS = JSON.stringify([{ keyId, secret: secretBase64Url, active: true }])
+process.env.LEGACY_RESOLVER_ENABLED = "false"
+process.env.REFERRAL_ANALYTICS_ENABLED = "true"
+process.env.VIZAJE_DESTINATION_HOSTS = "vizaje-nica.com"
 
 const db = getDb()
 
@@ -163,14 +171,70 @@ async function confirm(cookie: string, ticket: string, confirmed = true) {
   return { response, body }
 }
 
-function signedExchange(
+async function signedExchange(
   body: Record<string, string>,
   options: { timestamp?: number; nonce?: string; signature?: string; requestKeyId?: string } = {},
 ) {
-  return signedLegacy("/exchange", body, options)
+  const response = await signedLegacy("/exchange", body, options)
+  const result = await response.clone().json().catch(() => null) as { grantToken?: unknown } | null
+  if (typeof result?.grantToken === "string") {
+    createdGrantHashes.push(createHash("sha256").update(result.grantToken, "utf8").digest("hex"))
+  }
+  return response
+}
+
+function signedDashboard(
+  path: "/analytics" | "/referral-links/list" | "/referral-links/create" | `/referral-links/${string}/revoke` | "/unlink",
+  body: Record<string, unknown>,
+  options: { timestamp?: number; nonce?: string; signature?: string; requestKeyId?: string } = {},
+) {
+  const fullPath = `/v1/internal/creator-dashboard${path}`
+  const rawBody = JSON.stringify(body)
+  const timestamp = String(options.timestamp ?? Math.floor(Date.now() / 1000))
+  const nonce = options.nonce ?? randomBytes(16).toString("base64url")
+  const requestKeyId = options.requestKeyId ?? keyId
+  const canonical = buildAccountLinkCanonicalString({ keyId: requestKeyId, method: "POST", pathAndQuery: fullPath, timestamp, nonce, rawBody })
+  const signature = options.signature ?? createHmac("sha256", secret).update(canonical, "utf8").digest("hex")
+  return request(fullPath, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-vp-key-id": requestKeyId,
+      "x-vp-timestamp": timestamp,
+      "x-vp-nonce": nonce,
+      "x-vp-signature": signature,
+    },
+    body: rawBody,
+  })
+}
+
+async function createLegacyGrant(clientId: string) {
+  const fixture = await createFixture({})
+  const initiated = await initiate(clientId)
+  const confirmed = await confirm(fixture.cookie, initiated.body.ticket!)
+  const code = new URL(confirmed.body.callbackUrl!).searchParams.get("code")!
+  const exchange = await signedExchange({ code, legacyClientId: clientId, redirectUri, codeVerifier: initiated.verifier })
+  expect(exchange.status).toBe(200)
+  const result = await exchange.json() as { grantToken: string; scopes: string[]; partnerId: string }
+  expect(result.grantToken).toMatch(/^[A-Za-z0-9_-]{43}$/)
+  const tokenHash = createHash("sha256").update(result.grantToken, "utf8").digest("hex")
+  const rows = await db.select({ id: legacyCreatorAccessGrants.id }).from(legacyCreatorAccessGrants).where(eq(legacyCreatorAccessGrants.tokenHash, tokenHash)).limit(1)
+  expect(rows[0]?.id).toBeTruthy()
+  return { fixture, clientId, grantToken: result.grantToken, grantId: rows[0]!.id, partnerId: result.partnerId, scopes: result.scopes }
 }
 
 async function cleanFixtureData() {
+  const grants = createdGrantHashes.length
+    ? await db.select({ id: legacyCreatorAccessGrants.id }).from(legacyCreatorAccessGrants).where(inArray(legacyCreatorAccessGrants.tokenHash, createdGrantHashes))
+    : []
+  const grantIds = grants.map((grant) => grant.id)
+  if (grantIds.length) await db.delete(legacyReferralLinkIdempotency).where(inArray(legacyReferralLinkIdempotency.grantId, grantIds))
+  if (createdReferralLinkIds.length) {
+    await db.delete(auditLogs).where(and(eq(auditLogs.entityType, "referral_link"), inArray(auditLogs.entityId, createdReferralLinkIds)))
+    await db.delete(legacyReferralLinkIdempotency).where(inArray(legacyReferralLinkIdempotency.referralLinkId, createdReferralLinkIds))
+    await db.delete(referralLinks).where(inArray(referralLinks.id, createdReferralLinkIds))
+  }
+  if (grantIds.length) await db.delete(legacyCreatorAccessGrants).where(inArray(legacyCreatorAccessGrants.id, grantIds))
   if (createdPartnerIds.length) {
     await db.delete(auditLogs).where(and(eq(auditLogs.entityType, "partner"), inArray(auditLogs.entityId, createdPartnerIds)))
     await db.delete(partnerAccounts).where(inArray(partnerAccounts.partnerId, createdPartnerIds))
@@ -345,12 +409,141 @@ describe("Legacy account linking", () => {
   })
 
   test("returns only non-PII current partner status to Legacy", async () => {
-    const fixture = await createFixture({ status: "banned" })
-    const response = await signedLegacy("/partner-status", { partnerId: fixture.partnerId! })
+    const linked = await createLegacyGrant("client-status-check")
+    await db.update(partners).set({ status: "banned" }).where(eq(partners.id, linked.partnerId))
+    const response = await signedLegacy("/partner-status", { grantToken: linked.grantToken, legacyClientId: linked.clientId })
     expect(response.status).toBe(200)
     const result = await response.json() as Record<string, unknown>
-    expect(result).toEqual({ partnerId: fixture.partnerId, creatorId: expect.any(String), type: "creator", status: "banned" })
+    expect(result).toEqual({ partnerId: linked.partnerId, creatorId: expect.any(String), type: "creator", status: "banned" })
     expect(result).not.toHaveProperty("email")
     expect(result).not.toHaveProperty("phone")
+  })
+
+  test("issues a scoped grant and supports Legacy analytics and idempotent referral link management", async () => {
+    const linked = await createLegacyGrant("client-dashboard-happy")
+    process.env.REFERRAL_ANALYTICS_ALLOWED_PARTNER_IDS = linked.partnerId
+    expect(linked.scopes).toEqual(["account:status", "analytics:read", "links:read", "links:write", "account:unlink"])
+
+    const credentials = { grantToken: linked.grantToken, legacyClientId: linked.clientId }
+    const analytics = await signedDashboard("/analytics", credentials)
+    expect(analytics.status).toBe(200)
+    const analyticsBody = await analytics.json() as { summary: Record<string, unknown> }
+    expect(analyticsBody.summary).toMatchObject({ clicks: 0, addToCart: 0, createdOrders: 0, confirmedOrders: 0, revenueMdl: "0.00" })
+
+    const emptyLinks = await signedDashboard("/referral-links/list", { ...credentials, status: "all" })
+    expect(emptyLinks.status).toBe(200)
+    expect((await emptyLinks.json() as { links: unknown[] }).links).toEqual([])
+
+    const idempotencyKey = randomUUID()
+    const createBody = {
+      ...credentials,
+      idempotencyKey,
+      link: { linkType: "homepage", targetUrl: "https://vizaje-nica.com/ru/" },
+    }
+    const created = await signedDashboard("/referral-links/create", createBody)
+    expect(created.status).toBe(201)
+    const createdBody = await created.json() as { link: { id: string; targetUrl: string }; idempotent: boolean }
+    expect(createdBody.idempotent).toBe(false)
+    expect(createdBody.link.targetUrl).toBe("https://vizaje-nica.com/ru/")
+    createdReferralLinkIds.push(createdBody.link.id)
+
+    const retried = await signedDashboard("/referral-links/create", createBody)
+    expect(retried.status).toBe(200)
+    const retryBody = await retried.json() as { link: { id: string }; idempotent: boolean }
+    expect(retryBody).toMatchObject({ idempotent: true, link: { id: createdBody.link.id } })
+
+    const conflict = await signedDashboard("/referral-links/create", {
+      ...createBody,
+      link: { ...createBody.link, label: "Different payload" },
+    })
+    expect(conflict.status).toBe(409)
+    expect((await conflict.json() as { error: { code: string } }).error.code).toBe("IDEMPOTENCY_CONFLICT")
+
+    const listed = await signedDashboard("/referral-links/list", { ...credentials, status: "all" })
+    expect((await listed.json() as { links: unknown[] }).links).toHaveLength(1)
+
+    const revokePath = `/referral-links/${createdBody.link.id}/revoke` as const
+    const revoked = await signedDashboard(revokePath, credentials)
+    expect(revoked.status).toBe(200)
+    expect((await revoked.json() as { idempotent: boolean }).idempotent).toBe(false)
+    const repeatedRevoke = await signedDashboard(revokePath, credentials)
+    expect(repeatedRevoke.status).toBe(200)
+    expect((await repeatedRevoke.json() as { idempotent: boolean }).idempotent).toBe(true)
+
+    const unlinked = await signedDashboard("/unlink", credentials)
+    expect(unlinked.status).toBe(200)
+    expect(await unlinked.json()).toEqual({ unlinked: true, idempotent: false })
+    const repeatedUnlink = await signedDashboard("/unlink", credentials)
+    expect(repeatedUnlink.status).toBe(200)
+    expect(await repeatedUnlink.json()).toEqual({ unlinked: true, idempotent: true })
+    expect((await signedDashboard("/analytics", credentials)).status).toBe(401)
+  })
+
+  test("does not let a grant read a different Legacy account or caller-selected Partner UUID", async () => {
+    const linked = await createLegacyGrant("client-dashboard-bound")
+    const wrongClient = await signedDashboard("/analytics", { grantToken: linked.grantToken, legacyClientId: "some-other-client" })
+    expect(wrongClient.status).toBe(401)
+
+    const injectedPartner = await signedDashboard("/analytics", {
+      grantToken: linked.grantToken,
+      legacyClientId: linked.clientId,
+      partnerId: randomUUID(),
+    })
+    expect(injectedPartner.status).toBe(400)
+
+    await db.update(legacyCreatorAccessGrants).set({ scopes: ["analytics:read"] }).where(eq(legacyCreatorAccessGrants.id, linked.grantId))
+    const missingScope = await signedDashboard("/referral-links/list", { grantToken: linked.grantToken, legacyClientId: linked.clientId, status: "all" })
+    expect(missingScope.status).toBe(403)
+    expect((await missingScope.json() as { error: { code: string } }).error.code).toBe("ACCOUNT_LINK_SCOPE_REQUIRED")
+
+    const secondPartner = await createFixture({})
+    const secondInitiation = await initiate(linked.clientId)
+    const secondConfirmation = await confirm(secondPartner.cookie, secondInitiation.body.ticket!)
+    const secondCode = new URL(secondConfirmation.body.callbackUrl!).searchParams.get("code")!
+    const substituted = await signedExchange({ code: secondCode, legacyClientId: linked.clientId, redirectUri, codeVerifier: secondInitiation.verifier })
+    expect(substituted.status).toBe(409)
+    expect((await substituted.json() as { error: { code: string } }).error.code).toBe("LEGACY_ACCOUNT_ALREADY_LINKED")
+    const reusedAfterConflict = await signedExchange({ code: secondCode, legacyClientId: linked.clientId, redirectUri, codeVerifier: secondInitiation.verifier })
+    expect(reusedAfterConflict.status).toBe(400)
+  })
+
+  test("a linked creator cannot revoke a different creator's referral link", async () => {
+    const owner = await createLegacyGrant("client-link-owner")
+    const other = await createLegacyGrant("client-link-other")
+    const created = await signedDashboard("/referral-links/create", {
+      grantToken: owner.grantToken,
+      legacyClientId: owner.clientId,
+      idempotencyKey: randomUUID(),
+      link: { linkType: "homepage", targetUrl: "https://vizaje-nica.com/ru/" },
+    })
+    expect(created.status).toBe(201)
+    const body = await created.json() as { link: { id: string } }
+    createdReferralLinkIds.push(body.link.id)
+
+    const foreignRevoke = await signedDashboard(`/referral-links/${body.link.id}/revoke`, {
+      grantToken: other.grantToken,
+      legacyClientId: other.clientId,
+    })
+    expect(foreignRevoke.status).toBe(404)
+  })
+
+  test("requires active partner status, valid HMAC and a fresh nonce for Legacy dashboard requests", async () => {
+    const linked = await createLegacyGrant("client-dashboard-security")
+    const credentials = { grantToken: linked.grantToken, legacyClientId: linked.clientId }
+
+    const invalidSignature = await signedDashboard("/referral-links/list", { ...credentials, status: "all" }, { signature: "0".repeat(64) })
+    expect(invalidSignature.status).toBe(401)
+
+    const nonce = randomBytes(16).toString("base64url")
+    const first = await signedDashboard("/referral-links/list", { ...credentials, status: "all" }, { nonce })
+    const replay = await signedDashboard("/referral-links/list", { ...credentials, status: "all" }, { nonce })
+    expect(first.status).toBe(200)
+    expect(replay.status).toBe(409)
+    expect((await replay.json() as { error: { code: string } }).error.code).toBe("AUTH_NONCE_REPLAY")
+
+    await db.update(partners).set({ status: "suspended" }).where(eq(partners.id, linked.partnerId))
+    const suspended = await signedDashboard("/referral-links/list", { ...credentials, status: "all" })
+    expect(suspended.status).toBe(403)
+    expect((await suspended.json() as { error: { code: string } }).error.code).toBe("PARTNER_NOT_ACTIVE")
   })
 })

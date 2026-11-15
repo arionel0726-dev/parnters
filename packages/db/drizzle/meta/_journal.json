@@ -134,6 +134,13 @@
       "when": 1794373768809,
       "tag": "0018_thin_firebrand",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1794775202021,
+      "tag": "0019_lonely_karma",
+      "breakpoints": true
     }
   ]
 }

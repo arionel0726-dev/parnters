@@ -4,6 +4,12 @@ This module links an already authenticated Legacy customer to an approved
 creator account in Partners. It does not change Better Auth sessions,
 referral links, tracking, orders, commissions or payouts.
 
+After exchange, Partners issues a scoped opaque grant for the Legacy server.
+Partners stores only the grant hash, its Legacy client ID, Partner UUID and
+scopes. Legacy still keeps its own `clients.id ↔ Partner UUID` mapping. The
+grant is the verifiable proof that this exact pair completed the user-approved
+link flow; dashboard requests cannot choose a Partner UUID.
+
 The browser flow is split into two short-lived, one-time steps:
 
 1. Legacy creates an initiation context server-to-server.
@@ -129,12 +135,18 @@ Success response:
   "partnerId": "<uuid>",
   "creatorId": "CRE-000001",
   "type": "creator",
-  "status": "active"
+  "status": "active",
+  "grantToken": "<43-character-secret; store server-side only>",
+  "scopes": ["account:status", "analytics:read", "links:read", "links:write", "account:unlink"]
 }
 ```
 
 No email, phone, Better Auth session token or raw authorization code is
-returned. After the atomic exchange, the stored Legacy client ID is cleared.
+returned. The one-time code row clears its Legacy client ID. The grant token is
+returned only to the signed Legacy server response; its SHA-256 hash is stored
+by Partners. One active grant is allowed per Legacy client and per Partner.
+Re-linking the same pair rotates the grant. A different pairing is rejected
+with `409 LEGACY_ACCOUNT_ALREADY_LINKED`.
 
 ### Legacy partner status
 
@@ -143,10 +155,142 @@ returned. After the atomic exchange, the stored Legacy client ID is cleared.
 Request:
 
 ```json
-{ "partnerId": "<uuid>" }
+{
+  "grantToken": "<43-character-secret>",
+  "legacyClientId": "12345"
+}
 ```
 
-Response contains only `partnerId`, `creatorId`, `type` and current `status`.
+Requires an active account grant with `account:status`. The Partner UUID is
+resolved from that grant, never accepted from the caller. The response contains
+only `partnerId`, `creatorId`, `type` and current `status`, including a
+suspended/banned status so Legacy can disable the cabinet. A revoked or
+mismatched grant returns `401 ACCOUNT_LINK_GRANT_INVALID`.
+
+## Legacy creator dashboard API
+
+These routes use the same `LEGACY_TO_PARTNERS_HMAC_KEYS` service authentication
+as account linking. Every body includes `grantToken` and `legacyClientId`.
+Partners hashes the token, verifies the exact client ID, checks that the grant
+is active, checks the requested scope, and resolves the Partner UUID from its
+own grant row. `partnerId` is deliberately rejected in these request bodies.
+This prevents a caller from changing a link or analytics request to another
+creator. The HMAC proves the Legacy server; the grant proves that the specific
+Legacy client and creator completed account linking.
+
+All routes are `POST` requests and require the four HMAC headers described
+below. Generate a fresh nonce and signature for every HTTP attempt. The grant
+token is a credential: keep it only in protected Legacy server storage and
+never send it to the browser. Browser requests go to Legacy, which checks its
+current session and mapping before making a signed server-to-server request.
+
+### Read creator analytics
+
+`POST /v1/internal/creator-dashboard/analytics`
+
+Request:
+
+```json
+{
+  "grantToken": "<43-character-secret>",
+  "legacyClientId": "12345"
+}
+```
+
+Returns the existing Referral Analytics summary and per-link metrics: clicks,
+add-to-cart events, created/confirmed/cancelled orders, confirmed sales in
+MDL, and conversion. The endpoint requires `analytics:read` and
+`REFERRAL_ANALYTICS_ENABLED=true`. It does not expose M4 finance data or infer
+orders from add-to-cart events.
+
+### List referral links
+
+`POST /v1/internal/creator-dashboard/referral-links/list`
+
+Request (`status` is optional and defaults to `all`):
+
+```json
+{
+  "grantToken": "<43-character-secret>",
+  "legacyClientId": "12345",
+  "status": "all"
+}
+```
+
+Returns `{ "links": [...] }` using the existing referral-link response
+fields, including target, short URL, status, clicks and orders. Requires
+`links:read`.
+
+### Create a referral link
+
+`POST /v1/internal/creator-dashboard/referral-links/create`
+
+Request:
+
+```json
+{
+  "grantToken": "<43-character-secret>",
+  "legacyClientId": "12345",
+  "idempotencyKey": "<uuid generated once for this user action>",
+  "link": {
+    "linkType": "product",
+    "targetUrl": "https://vizaje-nica.com/ru/katalog/teni/111157",
+    "requestedLocale": "ru",
+    "label": "Мои тени"
+  }
+}
+```
+
+`link` uses the existing `referralLinkCreateSchema`, including the supported
+types `homepage`, `product`, `category`, and `brand`. The same destination
+validation, optional Legacy resolver, eligibility rules and audit behavior as
+the creator API are used. A successful first request returns HTTP 201 and
+`{ "link": ..., "idempotent": false }`. Retrying with the same key and same
+payload returns HTTP 200 with the same link and `idempotent: true`. Reusing a
+key with a different payload returns `409 IDEMPOTENCY_CONFLICT`. The idempotency
+record and created link commit atomically.
+
+### Revoke a referral link
+
+`POST /v1/internal/creator-dashboard/referral-links/{linkId}/revoke`
+
+Request body:
+
+```json
+{
+  "grantToken": "<43-character-secret>",
+  "legacyClientId": "12345"
+}
+```
+
+Requires `links:write`. Ownership is resolved from the grant; a link owned by
+another Partner returns `404 REFERRAL_LINK_NOT_FOUND`. Repeated revocation is
+safe and returns the already-revoked link with `idempotent: true`.
+
+### Unlink the account
+
+`POST /v1/internal/creator-dashboard/unlink`
+
+The Legacy server calls this only after authenticating the current Legacy
+user and confirming the stored mapping. The matching grant is revoked
+atomically; repeat calls return `idempotent: true`. After success, Legacy
+should remove its own client-to-Partner mapping and grant token. The token is
+not returned again and cannot access dashboard routes after revocation.
+
+### Dashboard API errors
+
+- `401 SERVICE_AUTH_INVALID`, `SERVICE_TIMESTAMP_INVALID`, or
+  `ACCOUNT_LINK_GRANT_INVALID`: fix service signing or restart account linking.
+- `409 AUTH_NONCE_REPLAY`: retry with a new timestamp, nonce and signature.
+- `403 PARTNER_NOT_ACTIVE`: the linked creator is suspended, banned or no
+  longer eligible.
+- `403 ACCOUNT_LINK_SCOPE_REQUIRED`: the grant lacks the requested scope.
+- `404 REFERRAL_LINK_NOT_FOUND`: link does not belong to this grant.
+- `409 IDEMPOTENCY_CONFLICT`: use the original payload with that key or create
+  a new key for a distinct action.
+- `503 FEATURE_DISABLED`: analytics are not enabled.
+- `400 INVALID_DESTINATION` or a `LEGACY_*` response: correct the URL/type or
+  retry after the resolver is available.
 
 ## HMAC
 
@@ -201,6 +345,13 @@ while the hash and consumed timestamp remain for replay detection and audit.
 
 `legacy_account_link_nonces` prevents HMAC replay. Expired nonce rows are
 removed when a new authenticated request arrives.
+
+`legacy_creator_access_grants` stores the SHA-256 grant hash, linked Legacy
+client ID, Partner UUID, scopes and revocation timestamp. Partial unique
+indexes enforce one active grant per Legacy client and per Partner. The raw
+grant is never persisted. `legacy_referral_link_idempotency` binds a create
+key and canonical request hash to its resulting referral link; both are
+written in the same transaction.
 
 ## Windows Legacy Codex requirements
 

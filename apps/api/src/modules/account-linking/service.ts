@@ -1,10 +1,11 @@
 import { createHash, randomBytes } from "node:crypto"
-import { auditLogs, getDb, legacyAccountLinkCodes, legacyAccountLinkInitiations, partners } from "@vizaje/db"
-import { and, eq, gt, isNull, lt, sql } from "drizzle-orm"
+import { auditLogs, getDb, legacyAccountLinkCodes, legacyAccountLinkInitiations, legacyCreatorAccessGrants, partners } from "@vizaje/db"
+import { and, eq, gt, isNull, lt, or, sql } from "drizzle-orm"
 import { getApiEnv } from "../../env"
 
 export const ACCOUNT_LINK_INITIATION_TTL_MS = 5 * 60 * 1000
 export const ACCOUNT_LINK_CODE_TTL_MS = 5 * 60 * 1000
+export const LEGACY_CREATOR_ACCESS_SCOPES = ["account:status", "analytics:read", "links:read", "links:write", "account:unlink"] as const
 
 export type AccountLinkPartnerState = {
   partnerId: string
@@ -184,13 +185,17 @@ export async function confirmAccountLinkInitiation(input: { ticket: string; part
     return { kind: "confirmed" as const, callbackUrl: callbackUrl.toString(), expiresAt: codeExpiresAt }
   })
 }
-
 export async function exchangeAccountLinkCode(input: {
   code: string
   legacyClientId: string
   redirectUri: string
   codeVerifier: string
-}): Promise<{ kind: "exchanged"; partner: AccountLinkPartnerState } | { kind: "invalid_code" } | { kind: "partner_not_active" }> {
+}): Promise<
+  | { kind: "exchanged"; partner: AccountLinkPartnerState; grantToken: string; scopes: readonly string[] }
+  | { kind: "invalid_code" }
+  | { kind: "partner_not_active" }
+  | { kind: "account_already_linked" }
+> {
   const now = new Date()
   const codeHash = hashAccountLinkCode(input.code)
 
@@ -216,6 +221,38 @@ export async function exchangeAccountLinkCode(input: {
 
     if (partner.status !== "active") return { kind: "partner_not_active" as const }
 
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`legacy-account-client:${stored.legacyClientId}`}))`)
+    const existingGrants = await tx.select().from(legacyCreatorAccessGrants).where(and(
+      isNull(legacyCreatorAccessGrants.revokedAt),
+      or(
+        eq(legacyCreatorAccessGrants.partnerId, partner.id),
+        eq(legacyCreatorAccessGrants.legacyClientId, stored.legacyClientId),
+      ),
+    )).limit(2)
+    if (existingGrants.some((grant) => grant.partnerId !== partner.id || grant.legacyClientId !== stored.legacyClientId)) {
+      return { kind: "account_already_linked" as const }
+    }
+
+    const grantToken = randomBytes(32).toString("base64url")
+    const tokenHash = createHash("sha256").update(grantToken, "utf8").digest("hex")
+    const existingGrant = existingGrants[0]
+    if (existingGrant) {
+      await tx.update(legacyCreatorAccessGrants).set({
+        tokenHash,
+        scopes: [...LEGACY_CREATOR_ACCESS_SCOPES],
+        updatedAt: now,
+      }).where(eq(legacyCreatorAccessGrants.id, existingGrant.id))
+    } else {
+      await tx.insert(legacyCreatorAccessGrants).values({
+        tokenHash,
+        legacyClientId: stored.legacyClientId,
+        partnerId: partner.id,
+        scopes: [...LEGACY_CREATOR_ACCESS_SCOPES],
+        createdAt: now,
+        updatedAt: now,
+      })
+    }
+
     await tx.insert(auditLogs).values({
       actorUserId: null,
       action: "LEGACY_ACCOUNT_LINK_CODE_EXCHANGED",
@@ -233,18 +270,8 @@ export async function exchangeAccountLinkCode(input: {
         type: "creator" as const,
         status: partner.status,
       },
+      grantToken,
+      scopes: LEGACY_CREATOR_ACCESS_SCOPES,
     }
   })
-}
-
-export async function getPartnerAccountLinkState(partnerId: string): Promise<AccountLinkPartnerState | null> {
-  const rows = await getDb().select({ id: partners.id, creatorId: partners.creatorId, type: partners.type, status: partners.status }).from(partners).where(eq(partners.id, partnerId)).limit(1)
-  const partner = rows[0]
-  if (!partner || partner.type !== "creator" || !partner.creatorId) return null
-  return {
-    partnerId: partner.id,
-    creatorId: partner.creatorId,
-    type: "creator",
-    status: partner.status,
-  }
 }

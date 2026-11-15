@@ -10,11 +10,11 @@ import {
   configuredAccountLinkRedirectUri,
   confirmAccountLinkInitiation,
   exchangeAccountLinkCode,
-  getPartnerAccountLinkState,
   inspectAccountLinkInitiation,
   issueAccountLinkInitiation,
 } from "./service"
 import { hasLegacyToPartnersHmacConfiguration, requireLegacyToPartnersHmac } from "./service-auth"
+import { getLegacyCreatorGrantState } from "../legacy-creator-dashboard/service"
 
 const initiationSchema = z.object({
   legacyClientId: z.string().trim().regex(/^[A-Za-z0-9_-]{1,64}$/),
@@ -39,7 +39,10 @@ const exchangeSchema = z.object({
   codeVerifier: z.string().regex(/^[A-Za-z0-9._~-]{43,128}$/),
 }).strict()
 
-const statusSchema = z.object({ partnerId: z.string().uuid() }).strict()
+const statusSchema = z.object({
+  grantToken: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+  legacyClientId: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
+}).strict()
 
 function requireTrustedOrigin(c: Context<ApiEnv>) {
   const origin = c.req.header("origin")
@@ -120,6 +123,7 @@ legacyAccountLinkRoutes.post("/initiate", async (c) => {
 })
 
 legacyAccountLinkRoutes.post("/exchange", async (c) => {
+  noStore(c)
   let payload: unknown
   try {
     payload = await c.req.json()
@@ -132,10 +136,19 @@ legacyAccountLinkRoutes.post("/exchange", async (c) => {
   const result = await exchangeAccountLinkCode(parsed.data)
   if (result.kind === "invalid_code") return apiError(c, 400, "AUTHORIZATION_CODE_INVALID", "Authorization code is invalid or expired.")
   if (result.kind === "partner_not_active") return apiError(c, 403, "PARTNER_NOT_ACTIVE", "Partner is not active.")
-  return c.json({ partnerId: result.partner.partnerId, creatorId: result.partner.creatorId, type: result.partner.type, status: result.partner.status })
+  if (result.kind === "account_already_linked") return apiError(c, 409, "LEGACY_ACCOUNT_ALREADY_LINKED", "This Legacy account or creator is already linked to another account.")
+  return c.json({
+    partnerId: result.partner.partnerId,
+    creatorId: result.partner.creatorId,
+    type: result.partner.type,
+    status: result.partner.status,
+    grantToken: result.grantToken,
+    scopes: result.scopes,
+  })
 })
 
 legacyAccountLinkRoutes.post("/partner-status", async (c) => {
+  noStore(c)
   let payload: unknown
   try {
     payload = await c.req.json()
@@ -145,7 +158,8 @@ legacyAccountLinkRoutes.post("/partner-status", async (c) => {
   const parsed = statusSchema.safeParse(payload)
   if (!parsed.success) return apiError(c, 400, "INVALID_REQUEST", "Invalid account linking request.")
 
-  const state = await getPartnerAccountLinkState(parsed.data.partnerId)
-  if (!state) return apiError(c, 404, "PARTNER_NOT_FOUND", "Partner was not found.")
-  return c.json(state)
+  const state = await getLegacyCreatorGrantState(parsed.data)
+  if (state.kind === "invalid_grant") return apiError(c, 401, "ACCOUNT_LINK_GRANT_INVALID", "Account linking grant is invalid.")
+  if (state.kind === "scope_required") return apiError(c, 403, "ACCOUNT_LINK_SCOPE_REQUIRED", "The linked account does not have permission for this operation.")
+  return c.json(state.partner)
 })

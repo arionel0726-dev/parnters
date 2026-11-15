@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto"
 import { and, eq } from "drizzle-orm"
-import { auditLogs, getDb, partners, referralLinkClicks, referralLinks } from "@vizaje/db"
+import { auditLogs, getDb, legacyReferralLinkIdempotency, partners, referralLinkClicks, referralLinks } from "@vizaje/db"
 import type { ReferralLinkCreateInput, ReferralLinkRenameInput } from "@vizaje/contracts"
 import { getApiEnv } from "../../env"
 import { buildTargetUrl, parseReferralDestination } from "./destinations"
@@ -72,7 +72,12 @@ export async function recordReferralClick(code: string, locale: "ru" | "ro" | nu
   return recordReferralClickForResolvedLink(result, locale)
 }
 
-export async function createReferralLink(partnerId: string, input: ReferralLinkCreateInput, actorUserId: string) {
+export async function createReferralLink(
+  partnerId: string,
+  input: ReferralLinkCreateInput,
+  actorUserId: string | null,
+  options: { idempotency?: { grantId: string; key: string; requestHash: string } } = {},
+) {
   const partnerRows = await getDb()
     .select({ id: partners.id, creatorId: partners.creatorId, type: partners.type, status: partners.status })
     .from(partners)
@@ -133,9 +138,39 @@ export async function createReferralLink(partnerId: string, input: ReferralLinkC
 
   for (let attempt = 0; attempt < 5; attempt += 1) {
     try {
-      const rows = await getDb()
-        .insert(referralLinks)
-        .values({
+      return await getDb().transaction(async (tx) => {
+        let idempotencyRecordId: string | undefined
+        if (options.idempotency) {
+          const reserved = await tx.insert(legacyReferralLinkIdempotency).values({
+            grantId: options.idempotency.grantId,
+            idempotencyKey: options.idempotency.key,
+            requestHash: options.idempotency.requestHash,
+            createdAt: now,
+          }).onConflictDoNothing({
+            target: [legacyReferralLinkIdempotency.grantId, legacyReferralLinkIdempotency.idempotencyKey],
+          }).returning({ id: legacyReferralLinkIdempotency.id })
+
+          if (!reserved[0]) {
+            const existingRows = await tx.select().from(legacyReferralLinkIdempotency).where(and(
+              eq(legacyReferralLinkIdempotency.grantId, options.idempotency.grantId),
+              eq(legacyReferralLinkIdempotency.idempotencyKey, options.idempotency.key),
+            )).limit(1)
+            const existing = existingRows[0]
+            if (!existing) throw new Error("Referral link idempotency record disappeared")
+            if (existing.requestHash !== options.idempotency.requestHash) return { kind: "idempotency_conflict" as const }
+            if (!existing.referralLinkId) throw new Error("Referral link idempotency record is incomplete")
+            const existingLinkRows = await tx.select().from(referralLinks).where(and(
+              eq(referralLinks.id, existing.referralLinkId),
+              eq(referralLinks.partnerId, partnerId),
+            )).limit(1)
+            const existingLink = existingLinkRows[0]
+            if (!existingLink) throw new Error("Idempotent referral link is unavailable")
+            return { kind: "idempotent" as const, link: serializeReferralLink(existingLink) }
+          }
+          idempotencyRecordId = reserved[0].id
+        }
+
+        const rows = await tx.insert(referralLinks).values({
           partnerId,
           code: generateReferralCode(),
           label: input.label ?? defaultLabel(input.linkType),
@@ -146,19 +181,22 @@ export async function createReferralLink(partnerId: string, input: ReferralLinkC
           expiresAt,
           createdAt: now,
           updatedAt: now,
+        }).returning()
+        const link = rows[0]
+        if (!link) throw new Error("Referral link creation failed")
+        await tx.insert(auditLogs).values({
+          actorUserId,
+          action: "REFERRAL_LINK_CREATED",
+          entityType: "referral_link",
+          entityId: link.id,
+          metadata: { partnerId, creatorId: partner.creatorId, linkType: link.linkType, targetPath: link.targetPath, ...(options.idempotency ? { source: "legacy_creator_dashboard" } : {}) },
+          createdAt: now,
         })
-        .returning()
-      const link = rows[0]
-      if (!link) throw new Error("Referral link creation failed")
-      await getDb().insert(auditLogs).values({
-        actorUserId,
-        action: "REFERRAL_LINK_CREATED",
-        entityType: "referral_link",
-        entityId: link.id,
-        metadata: { partnerId, creatorId: partner.creatorId, linkType: link.linkType, targetPath: link.targetPath },
-        createdAt: now,
+        if (idempotencyRecordId) {
+          await tx.update(legacyReferralLinkIdempotency).set({ referralLinkId: link.id }).where(eq(legacyReferralLinkIdempotency.id, idempotencyRecordId))
+        }
+        return { kind: "created" as const, link: serializeReferralLink(link) }
       })
-      return { kind: "created" as const, link: serializeReferralLink(link) }
     } catch (error) {
       const message = error instanceof Error ? error.message : ""
       const code = error as { code?: string; cause?: { code?: string } }
@@ -195,29 +233,42 @@ export async function renameReferralLink(partnerId: string, linkId: string, inpu
   return { kind: "renamed" as const, link: serializeReferralLink(link) }
 }
 
-export async function revokeReferralLink(partnerId: string, linkId: string, actorUserId: string) {
-  const existing = await getReferralLinkForPartner(partnerId, linkId)
-  if (!existing) return { kind: "not_found" as const }
-  if (existing.status === "revoked") return { kind: "already_revoked" as const, link: serializeReferralLink(existing) }
-
+export async function revokeReferralLink(partnerId: string, linkId: string, actorUserId: string | null) {
   const now = new Date()
-  const rows = await getDb()
-    .update(referralLinks)
-    .set({ status: "revoked", revokedAt: now, updatedAt: now })
-    .where(and(eq(referralLinks.id, linkId), eq(referralLinks.partnerId, partnerId), eq(referralLinks.status, "active")))
-    .returning()
-  const link = rows[0]
-  if (!link) return { kind: "not_found" as const }
+  return getDb().transaction(async (tx) => {
+    const existingRows = await tx.select().from(referralLinks).where(and(
+      eq(referralLinks.id, linkId),
+      eq(referralLinks.partnerId, partnerId),
+    )).limit(1)
+    const existing = existingRows[0]
+    if (!existing) return { kind: "not_found" as const }
+    if (existing.status === "revoked") return { kind: "already_revoked" as const, link: serializeReferralLink(existing) }
 
-  await getDb().insert(auditLogs).values({
-    actorUserId,
-    action: "REFERRAL_LINK_REVOKED",
-    entityType: "referral_link",
-    entityId: link.id,
-    metadata: { partnerId, code: link.code },
-    createdAt: now,
+    const rows = await tx.update(referralLinks)
+      .set({ status: "revoked", revokedAt: now, updatedAt: now })
+      .where(and(eq(referralLinks.id, linkId), eq(referralLinks.partnerId, partnerId), eq(referralLinks.status, "active")))
+      .returning()
+    const link = rows[0]
+    if (!link) {
+      const currentRows = await tx.select().from(referralLinks).where(and(
+        eq(referralLinks.id, linkId),
+        eq(referralLinks.partnerId, partnerId),
+      )).limit(1)
+      const current = currentRows[0]
+      if (current?.status === "revoked") return { kind: "already_revoked" as const, link: serializeReferralLink(current) }
+      return { kind: "not_found" as const }
+    }
+
+    await tx.insert(auditLogs).values({
+      actorUserId,
+      action: "REFERRAL_LINK_REVOKED",
+      entityType: "referral_link",
+      entityId: link.id,
+      metadata: { partnerId, code: link.code },
+      createdAt: now,
+    })
+    return { kind: "revoked" as const, link: serializeReferralLink(link) }
   })
-  return { kind: "revoked" as const, link: serializeReferralLink(link) }
 }
 
 export async function validateActiveReferralCode(code: string) {
