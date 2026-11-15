@@ -216,6 +216,36 @@ describe("referral analytics backend", () => {
     expect(attributions[0]?.tokenHash).not.toBe(handoffToken)
     expect(attributions[0]?.visitKeyHash).toBe(createHash("sha256").update(visitKey).digest("hex"))
     expect(await db.select().from(referralLinkClicks).where(eq(referralLinkClicks.partnerId, partnerId))).toHaveLength(0)
+
+    const linksResponse = await request("/v1/partner/referral-links?status=all", { headers: { cookie: creatorCookie } })
+    expect(linksResponse.status).toBe(200)
+    expect((await linksResponse.json() as { links: Array<{ id: string; clicks: number; orders: number }> }).links)
+      .toContainEqual(expect.objectContaining({ id: linkId, clicks: 1, orders: 0 }))
+  })
+
+  test("uses the allowlisted attribution as the sole new-analytics click source", async () => {
+    const attributions = await db.select().from(referralAttributions).where(eq(referralAttributions.partnerId, partnerId))
+    const attribution = attributions[0]
+    expect(attribution).toBeDefined()
+    const now = new Date()
+    // Simulate old tracking rows and an attribution-linked click log. Neither is
+    // the click source for a partner currently served by Referral Analytics.
+    await db.insert(referralLinkClicks).values([
+      { referralLinkId: linkId, attributionId: attribution!.id, partnerId, locale: "ro", clickedAt: now, createdAt: now, updatedAt: now },
+      { referralLinkId: linkId, attributionId: null, partnerId, locale: "ru", clickedAt: now, createdAt: now, updatedAt: now },
+    ])
+
+    const linksResponse = await request("/v1/partner/referral-links?status=all", { headers: { cookie: creatorCookie } })
+    expect(linksResponse.status).toBe(200)
+    expect((await linksResponse.json() as { links: Array<{ id: string; clicks: number; orders: number }> }).links)
+      .toContainEqual(expect.objectContaining({ id: linkId, clicks: 1, orders: 0 }))
+
+    const analyticsResponse = await request("/v1/partner/referral-analytics", { headers: { cookie: creatorCookie } })
+    expect(analyticsResponse.status).toBe(200)
+    expect(await analyticsResponse.json()).toMatchObject({
+      summary: { clicks: 1, addToCart: 0, createdOrders: 0, confirmedOrders: 0 },
+      links: [{ linkId, clicks: 1, addToCart: 0, createdOrders: 0, confirmedOrders: 0 }],
+    })
   })
 
   test("exchanges the handoff once and rejects replay or invalid HMAC", async () => {
@@ -335,6 +365,10 @@ describe("referral analytics backend", () => {
     const publicOrder = await request("/v1/public/referral-analytics/events", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...body, eventName: "order.created" }) })
     expect(publicOrder.status).toBe(400)
 
+    const linksResponse = await request("/v1/partner/referral-links?status=all", { headers: { cookie: creatorCookie } })
+    expect((await linksResponse.json() as { links: Array<{ id: string; clicks: number; orders: number }> }).links)
+      .toContainEqual(expect.objectContaining({ id: linkId, clicks: 1, orders: 0 }))
+
     const creatorAnalytics = await request("/v1/partner/analytics")
     expect(creatorAnalytics.status).toBe(401)
   })
@@ -374,5 +408,25 @@ describe("referral analytics backend", () => {
     expect(creatorAnalytics.status).toBe(200)
     const creatorAnalyticsBody = await creatorAnalytics.json() as { summary: { clicks: number; addToCart: number; createdOrders: number; confirmedOrders: number; cancelledOrders: number; revenueMdl: string } }
     expect(creatorAnalyticsBody.summary).toMatchObject({ clicks: 1, addToCart: 1, createdOrders: 1, confirmedOrders: 0, cancelledOrders: 1, revenueMdl: "0.00" })
+  })
+
+  test("keeps historical attribution clicks but rejects new clicks after link revocation", async () => {
+    const revoked = await request(`/v1/partner/referral-links/${linkId}/revoke`, {
+      method: "PATCH",
+      headers: { cookie: creatorCookie },
+    })
+    expect(revoked.status).toBe(200)
+
+    const click = await request("/v1/internal/referral-links/click", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-service-token": serviceToken },
+      body: JSON.stringify({ code }),
+    })
+    expect(click.status).toBe(200)
+    expect(await click.json()).toMatchObject({ valid: false })
+
+    const linksResponse = await request("/v1/partner/referral-links?status=all", { headers: { cookie: creatorCookie } })
+    expect((await linksResponse.json() as { links: Array<{ id: string; status: string; clicks: number; orders: number }> }).links)
+      .toContainEqual(expect.objectContaining({ id: linkId, status: "revoked", clicks: 1, orders: 0 }))
   })
 })

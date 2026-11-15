@@ -6,7 +6,6 @@ import {
   referralAnalyticsEvents,
   referralAnalyticsItems,
   referralAttributions,
-  referralLinkClicks,
   referralLinks,
 } from "@vizaje/db"
 import { getApiEnv } from "../../env"
@@ -423,16 +422,13 @@ export async function getCreatorReferralAnalytics(partnerId: string, linkId?: st
   const metrics = new Map(linkRows.map((link) => [link.id, createMetric(link)]))
   if (!linkIds.length) return { summary: { clicks: 0, addToCart: 0, createdOrders: 0, confirmedOrders: 0, cancelledOrders: 0, revenueMdl: "0.00", conversionRate: 0 }, links: [] }
 
-  const [oldClickRows, attributionRows, events] = await Promise.all([
-    getDb().select({ linkId: referralLinkClicks.referralLinkId, count: sql<number>`count(*)::int` }).from(referralLinkClicks).where(and(
-      eq(referralLinkClicks.partnerId, partnerId),
-      isNull(referralLinkClicks.attributionId),
-      inArray(referralLinkClicks.referralLinkId, linkIds),
-    )).groupBy(referralLinkClicks.referralLinkId),
-    getDb().select({ linkId: referralAttributions.referralLinkId, count: sql<number>`count(*)::int` }).from(referralAttributions).where(inArray(referralAttributions.referralLinkId, linkIds)).groupBy(referralAttributions.referralLinkId),
+  const [attributionRows, events] = await Promise.all([
+    getDb().select({ linkId: referralAttributions.referralLinkId, count: sql<number>`count(*)::int` }).from(referralAttributions).where(and(
+      eq(referralAttributions.partnerId, partnerId),
+      inArray(referralAttributions.referralLinkId, linkIds),
+    )).groupBy(referralAttributions.referralLinkId),
     getDb().select().from(referralAnalyticsEvents).where(inArray(referralAnalyticsEvents.referralLinkId, linkIds)).orderBy(desc(referralAnalyticsEvents.occurredAt)),
   ])
-  for (const row of oldClickRows) metrics.get(row.linkId)!.clicks += Number(row.count)
   for (const row of attributionRows) metrics.get(row.linkId)!.clicks += Number(row.count)
 
   const latestOrders = new Map<string, typeof events[number]>()

@@ -1,5 +1,6 @@
-import { and, desc, eq, gt, isNull, or, sql } from "drizzle-orm"
-import { getDb, partners, referralLinkClicks, referralLinks, referralOrders } from "@vizaje/db"
+import { and, desc, eq, gt, inArray, isNull, or, sql } from "drizzle-orm"
+import { getDb, partners, referralAttributions, referralLinkClicks, referralLinks, referralOrders } from "@vizaje/db"
+import { getApiEnv } from "../../env"
 
 export async function listReferralLinks(partnerId: string, status?: "active" | "revoked") {
   const filters = [eq(referralLinks.partnerId, partnerId)]
@@ -63,16 +64,54 @@ export async function getReferralLinkByCode(code: string) {
 
 export async function getReferralLinkStats(linkIds: string[]) {
   if (!linkIds.length) return new Map<string, { clicks: number; orders: number }>()
+  const db = getDb()
+  const env = getApiEnv()
+  const linkOwners = await db
+    .select({ id: referralLinks.id, partnerId: referralLinks.partnerId })
+    .from(referralLinks)
+    .where(inArray(referralLinks.id, linkIds))
+  const analyticsPartnerIds = new Set(env.REFERRAL_ANALYTICS_ALLOWED_PARTNER_IDS)
+  const analyticsLinkIds = linkOwners
+    .filter(({ partnerId }) => env.REFERRAL_ANALYTICS_ENABLED && analyticsPartnerIds.has(partnerId))
+    .map(({ id }) => id)
+  const legacyTrackingLinkIds = linkOwners
+    .filter(({ id }) => !analyticsLinkIds.includes(id))
+    .map(({ id }) => id)
+
   const [clickRows, orderRows] = await Promise.all([
-    getDb()
-      .select({ linkId: referralLinkClicks.referralLinkId, count: sql<number>`count(*)::int` })
-      .from(referralLinkClicks)
-      .where(or(...linkIds.map((id) => eq(referralLinkClicks.referralLinkId, id))))
-      .groupBy(referralLinkClicks.referralLinkId),
-    getDb()
+    (async () => {
+      const trackingRows = legacyTrackingLinkIds.length
+        ? await db
+          .select({ linkId: referralLinkClicks.referralLinkId, count: sql<number>`count(*)::int` })
+          .from(referralLinkClicks)
+          .innerJoin(referralLinks, and(
+            eq(referralLinks.id, referralLinkClicks.referralLinkId),
+            eq(referralLinks.partnerId, referralLinkClicks.partnerId),
+          ))
+          .where(inArray(referralLinkClicks.referralLinkId, legacyTrackingLinkIds))
+          .groupBy(referralLinkClicks.referralLinkId)
+        : []
+      const attributionRows = analyticsLinkIds.length
+        ? await db
+          .select({ linkId: referralAttributions.referralLinkId, count: sql<number>`count(*)::int` })
+          .from(referralAttributions)
+          .innerJoin(referralLinks, and(
+            eq(referralLinks.id, referralAttributions.referralLinkId),
+            eq(referralLinks.partnerId, referralAttributions.partnerId),
+          ))
+          .where(inArray(referralAttributions.referralLinkId, analyticsLinkIds))
+          .groupBy(referralAttributions.referralLinkId)
+        : []
+      return [...trackingRows, ...attributionRows]
+    })(),
+    db
       .select({ linkId: referralOrders.referralLinkId, count: sql<number>`count(*) filter (where ${referralOrders.status} = 'confirmed')::int` })
       .from(referralOrders)
-      .where(or(...linkIds.map((id) => eq(referralOrders.referralLinkId, id))))
+      .innerJoin(referralLinks, and(
+        eq(referralLinks.id, referralOrders.referralLinkId),
+        eq(referralLinks.partnerId, referralOrders.partnerId),
+      ))
+      .where(inArray(referralOrders.referralLinkId, linkIds))
       .groupBy(referralOrders.referralLinkId),
   ])
   const stats = new Map<string, { clicks: number; orders: number }>()
